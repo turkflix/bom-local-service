@@ -124,8 +124,10 @@ public class ScrapingService : IScrapingService
             if (!string.IsNullOrEmpty(summaryText))
             {
                 // Parse "3 of 3 location results" or similar
+                // Pattern has 2 capture groups: (\d+) of (\d+)
+                // Groups[0] = full match, Groups[1] = first number, Groups[2] = second number (total)
                 var countMatch = System.Text.RegularExpressions.Regex.Match(summaryText, @"(\d+)\s+of\s+(\d+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-                if (countMatch.Success && countMatch.Groups.Count >= 3)
+                if (countMatch.Success && countMatch.Groups.Count >= 3 && countMatch.Groups[2].Success)
                 {
                     if (int.TryParse(countMatch.Groups[2].Value, out var total))
                     {

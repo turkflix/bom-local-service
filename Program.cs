@@ -34,8 +34,17 @@ if (app.Environment.IsDevelopment())
     app.MapOpenApi();
 }
 
-app.UseHttpsRedirection();
-app.UseAuthorization();
+// HTTPS redirection is optional and disabled by default for Docker flexibility
+// Users can enable it by setting ENABLE_HTTPS_REDIRECTION=true environment variable
+// or EnableHttpsRedirection=true in appsettings.json
+var enableHttpsRedirection = builder.Configuration.GetValue<bool>("EnableHttpsRedirection", false) ||
+                             Environment.GetEnvironmentVariable("ENABLE_HTTPS_REDIRECTION")?.Equals("true", StringComparison.OrdinalIgnoreCase) == true;
+if (enableHttpsRedirection)
+{
+    app.UseHttpsRedirection();
+}
+
+// No authorization required - service is designed to run behind a reverse proxy if auth is needed
 app.MapControllers();
 
 // Cleanup on shutdown
