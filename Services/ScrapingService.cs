@@ -380,15 +380,7 @@ public class ScrapingService : IScrapingService
             _logger.LogInformation("Verifying scrubber is at position 0");
             try
             {
-                await page.WaitForFunctionAsync(@"() => {
-                    const thumb = document.querySelector('[data-testid=""bom-scrub-thumb""]');
-                    if (!thumb) return false;
-                    const left = parseFloat(thumb.style.left) || 0;
-                    // Position 0 should be at 0% or very close to it (within 5%)
-                    return left <= 5;
-                }", new PageWaitForFunctionOptions { Timeout = 5000 });
-                
-                // Also verify the active segment has data-id="0"
+                // Check if the active segment has data-id="0" (simpler and more reliable than checking thumb position)
                 var activeSegment = await page.EvaluateAsync<bool>(@"() => {
                     const segments = Array.from(document.querySelectorAll('[data-testid=""bom-scrub-segment""]'));
                     const activeSegment = segments.find(s => {
@@ -400,16 +392,16 @@ public class ScrapingService : IScrapingService
                 
                 if (activeSegment)
                 {
-                    _logger.LogInformation("Scrubber confirmed at position 0");
+                    _logger.LogInformation("Scrubber confirmed at position 0 (active segment is frame 0)");
                 }
                 else
                 {
-                    _logger.LogWarning("Could not confirm scrubber is at position 0, but continuing");
+                    _logger.LogDebug("Could not confirm scrubber position via active segment, but continuing (frame 0 was clicked)");
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Failed to verify scrubber position, continuing anyway");
+                _logger.LogDebug(ex, "Scrubber position verification failed, continuing anyway (non-critical check)");
             }
 
             await _debugService.SaveStepDebugAsync(debugFolder, 10, "scrubber_at_position_0", page, consoleMessages, networkRequests, cancellationToken);
