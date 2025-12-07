@@ -16,6 +16,7 @@ public interface IScrapingService
     /// </summary>
     /// <param name="suburb">The suburb name (e.g., "Pomona", "Brisbane")</param>
     /// <param name="state">The Australian state abbreviation (e.g., "QLD", "NSW", "VIC")</param>
+    /// <param name="cacheFolderPath">The cache folder path where frames and metadata will be saved</param>
     /// <param name="debugFolder">Folder path for saving debug files (screenshots, HTML, logs) if debug mode is enabled</param>
     /// <param name="page">The Playwright page instance to use for scraping</param>
     /// <param name="consoleMessages">List to capture console messages from the browser (for debugging)</param>
@@ -25,6 +26,7 @@ public interface IScrapingService
     Task<RadarResponse> ScrapeRadarScreenshotAsync(
         string suburb,
         string state,
+        string cacheFolderPath,
         string debugFolder,
         IPage page,
         List<(string type, string text, DateTime timestamp)> consoleMessages,

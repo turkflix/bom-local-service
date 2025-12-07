@@ -75,6 +75,7 @@ public class ScrapingService : IScrapingService
     public async Task<RadarResponse> ScrapeRadarScreenshotAsync(
         string suburb,
         string state,
+        string cacheFolderPath,
         string debugFolder,
         IPage page,
         List<(string type, string text, DateTime timestamp)> consoleMessages,
@@ -444,14 +445,9 @@ public class ScrapingService : IScrapingService
                 Height = boundingBox.Height
             };
 
-            // Step 13: Create cache folder
-            var locationKey = LocationHelper.GetLocationKey(suburb, state);
-            var safeLocationKey = LocationHelper.SanitizeFileName(locationKey);
-            var timestamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss");
-            var cacheFolderPath = FilePathHelper.GetCacheFolderPath(_cacheService.GetCacheDirectory(), suburb, state, timestamp);
+            // Step 13: Use provided cache folder (already created by BomRadarService)
             Directory.CreateDirectory(cacheFolderPath);
-
-            _logger.LogInformation("Created cache folder: {Path}", cacheFolderPath);
+            _logger.LogInformation("Using cache folder: {Path}", cacheFolderPath);
 
             // Step 14-20: Capture all 7 frames
             var frames = new List<RadarFrame>();
@@ -528,6 +524,21 @@ public class ScrapingService : IScrapingService
             // Step 21: Save metadata and frame information
             await _cacheService.SaveMetadataAsync(cacheFolderPath, lastUpdatedInfo, cancellationToken);
             await _cacheService.SaveFramesMetadataAsync(cacheFolderPath, frames, cancellationToken);
+            
+            // Remove lock file to indicate cache folder is complete
+            var lockFilePath = FilePathHelper.GetCacheLockFilePath(cacheFolderPath);
+            try
+            {
+                if (File.Exists(lockFilePath))
+                {
+                    File.Delete(lockFilePath);
+                    _logger.LogDebug("Removed cache lock file: {Path}", lockFilePath);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to remove cache lock file: {Path}", lockFilePath);
+            }
 
             // Step 22: Return response with all frames
             return ResponseBuilder.CreateRadarResponse(cacheFolderPath, frames, lastUpdatedInfo, suburb, state);
@@ -550,9 +561,8 @@ public class ScrapingService : IScrapingService
         var x = containerClip.X + _cropConfig.X;
         var y = containerClip.Y + _cropConfig.Y;
         
-        // Calculate width (use configured or remaining width minus right offset)
-        var rightOffset = 200;
-        var width = _cropConfig.Width ?? (containerClip.Width - _cropConfig.X - rightOffset);
+        // Calculate width (use configured or remaining width from X to right edge)
+        var width = _cropConfig.Width ?? (containerClip.Width - _cropConfig.X);
         
         // Calculate height (use configured or remaining height)
         var height = _cropConfig.Height ?? (containerClip.Height - _cropConfig.Y);

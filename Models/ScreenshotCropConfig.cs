@@ -20,7 +20,7 @@ public class ScreenshotCropConfig
 
     /// <summary>
     /// Width of the crop area in pixels.
-    /// If null, uses the full container width minus X offset.
+    /// If null, uses the remaining container width from X offset to the right edge.
     /// </summary>
     public int? Width { get; set; }
 

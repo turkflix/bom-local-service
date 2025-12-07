@@ -14,11 +14,13 @@ public interface ICacheService
     /// </summary>
     /// <param name="suburb">The suburb name (e.g., "Pomona", "Brisbane")</param>
     /// <param name="state">The Australian state abbreviation (e.g., "QLD", "NSW", "VIC")</param>
+    /// <param name="excludeFolder">Optional folder path to exclude from search (e.g., folder currently being written to)</param>
     /// <param name="cancellationToken">Cancellation token to cancel the operation</param>
     /// <returns>Tuple containing the cache folder path and metadata, or (null, null) if not found</returns>
     Task<(string? cacheFolderPath, LastUpdatedInfo? metadata)> GetCachedScreenshotWithMetadataAsync(
         string suburb, 
         string state, 
+        string? excludeFolder = null,
         CancellationToken cancellationToken = default);
     
     /// <summary>

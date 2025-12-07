@@ -78,5 +78,15 @@ public static class FilePathHelper
         var safeLocationKey = LocationHelper.SanitizeFileName(locationKey);
         return $"{safeLocationKey}_*";
     }
+
+    /// <summary>
+    /// Gets the lock file path for a cache folder.
+    /// This file indicates the folder is currently being written to.
+    /// Format: "{CacheFolderPath}/.writing"
+    /// </summary>
+    public static string GetCacheLockFilePath(string cacheFolderPath)
+    {
+        return Path.Combine(cacheFolderPath, ".writing");
+    }
 }
 

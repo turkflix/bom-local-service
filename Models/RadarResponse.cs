@@ -49,5 +49,33 @@ public class RadarResponse
     /// May be null if the distance cannot be parsed or if metadata is not available.
     /// </summary>
     public string? Distance { get; set; }
+
+    /// <summary>
+    /// Indicates whether the cached data is still considered valid based on its observation time
+    /// and the configured cache expiration period.
+    /// </summary>
+    public bool CacheIsValid { get; set; }
+
+    /// <summary>
+    /// The UTC date and time when the current cached data is expected to expire.
+    /// This is calculated based on the observation time and a configured buffer (e.g., 15.5 minutes).
+    /// Null if cache is not valid or metadata is not available.
+    /// </summary>
+    public DateTime? CacheExpiresAt { get; set; }
+
+    /// <summary>
+    /// Indicates whether a cache update is currently in progress for this location.
+    /// When true, clients should wait before requesting a refresh, as a new cache is being generated.
+    /// </summary>
+    public bool IsUpdating { get; set; }
+
+    /// <summary>
+    /// The UTC date and time when the next cache update is expected or recommended.
+    /// - If cache is valid: equals <see cref="CacheExpiresAt"/> (check again when cache expires).
+    /// - If cache is invalid and an update is in progress: estimated completion time (approximately 2 minutes from now).
+    /// - If cache is invalid and no update is in progress: null (client should trigger an update).
+    /// This may differ from <see cref="CacheExpiresAt"/> when an update is actively in progress.
+    /// </summary>
+    public DateTime? NextUpdateTime { get; set; }
 }
 

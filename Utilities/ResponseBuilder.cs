@@ -12,7 +12,10 @@ public static class ResponseBuilder
         List<RadarFrame> frames,
         LastUpdatedInfo? metadata = null,
         string? suburb = null,
-        string? state = null)
+        string? state = null,
+        bool? cacheIsValid = null,
+        DateTime? cacheExpiresAt = null,
+        bool isUpdating = false)
     {
         var folderInfo = new DirectoryInfo(cacheFolderPath);
         var lastWriteTime = folderInfo.Exists 
@@ -30,26 +33,21 @@ public static class ResponseBuilder
             }
         }
 
-        if (metadata == null)
-        {
-            return new RadarResponse
-            {
-                Frames = frames,
-                LastUpdated = lastWriteTime,
-                ObservationTime = DateTime.UtcNow,
-                ForecastTime = DateTime.UtcNow
-            };
-        }
-
-        return new RadarResponse
+        var response = new RadarResponse
         {
             Frames = frames,
             LastUpdated = lastWriteTime,
-            ObservationTime = metadata.ObservationTime,
-            ForecastTime = metadata.ForecastTime,
-            WeatherStation = metadata.WeatherStation,
-            Distance = metadata.Distance
+            ObservationTime = metadata?.ObservationTime ?? DateTime.UtcNow,
+            ForecastTime = metadata?.ForecastTime ?? DateTime.UtcNow,
+            WeatherStation = metadata?.WeatherStation,
+            Distance = metadata?.Distance,
+            CacheIsValid = cacheIsValid ?? false,
+            CacheExpiresAt = cacheExpiresAt,
+            IsUpdating = isUpdating,
+            NextUpdateTime = cacheExpiresAt ?? (isUpdating ? DateTime.UtcNow.AddMinutes(2) : null) // Estimate 2 min for update if in progress
         };
+
+        return response;
     }
     
     /// <summary>

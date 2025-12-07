@@ -27,6 +27,7 @@ public class CacheService : ICacheService
     public async Task<(string? cacheFolderPath, LastUpdatedInfo? metadata)> GetCachedScreenshotWithMetadataAsync(
         string suburb, 
         string state, 
+        string? excludeFolder = null,
         CancellationToken cancellationToken = default)
     {
         var pattern = FilePathHelper.GetCacheFolderPattern(suburb, state);
@@ -47,14 +48,52 @@ public class CacheService : ICacheService
             })
             .ToList();
 
-        var cacheFolderPath = folders.FirstOrDefault();
-        if (string.IsNullOrEmpty(cacheFolderPath) || !Directory.Exists(cacheFolderPath))
+        // Find the first complete cache folder (has all 7 frames + metadata)
+        foreach (var folder in folders)
         {
-            return (null, null);
+            if (!Directory.Exists(folder))
+                continue;
+            
+            // Skip the folder if it's being excluded (currently being written to)
+            if (!string.IsNullOrEmpty(excludeFolder) && Path.GetFullPath(folder).Equals(Path.GetFullPath(excludeFolder), StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogDebug("Skipping excluded cache folder (being written to): {Folder}", folder);
+                continue;
+            }
+            
+            // Check if folder is complete: must have all 7 frames and metadata.json
+            var hasAllFrames = true;
+            for (int i = 0; i < 7; i++)
+            {
+                var framePath = FilePathHelper.GetFrameFilePath(folder, i);
+                if (!File.Exists(framePath))
+                {
+                    hasAllFrames = false;
+                    break;
+                }
+            }
+            
+            if (!hasAllFrames)
+            {
+                _logger.LogDebug("Skipping incomplete cache folder: {Folder}", folder);
+                continue; // Skip incomplete folders (currently being written to)
+            }
+            
+            // Check if metadata exists (indicates folder is complete)
+            var metadataPath = FilePathHelper.GetMetadataFilePath(folder);
+            if (!File.Exists(metadataPath))
+            {
+                _logger.LogDebug("Skipping cache folder without metadata: {Folder}", folder);
+                continue; // Skip folders without metadata
+            }
+            
+            // This folder is complete
+            var metadata = await LoadMetadataAsync(folder, cancellationToken);
+            return (folder, metadata);
         }
 
-        var metadata = await LoadMetadataAsync(cacheFolderPath, cancellationToken);
-        return (cacheFolderPath, metadata);
+        // No complete cache folder found
+        return (null, null);
     }
     
     /// <summary>
@@ -65,7 +104,7 @@ public class CacheService : ICacheService
         string state, 
         CancellationToken cancellationToken = default)
     {
-        var (cacheFolderPath, _) = await GetCachedScreenshotWithMetadataAsync(suburb, state, cancellationToken);
+        var (cacheFolderPath, _) = await GetCachedScreenshotWithMetadataAsync(suburb, state, null, cancellationToken);
         
         if (string.IsNullOrEmpty(cacheFolderPath) || !Directory.Exists(cacheFolderPath))
         {
@@ -115,7 +154,7 @@ public class CacheService : ICacheService
             return null;
         }
         
-        var (cacheFolderPath, _) = await GetCachedScreenshotWithMetadataAsync(suburb, state, cancellationToken);
+        var (cacheFolderPath, _) = await GetCachedScreenshotWithMetadataAsync(suburb, state, null, cancellationToken);
         
         if (string.IsNullOrEmpty(cacheFolderPath))
         {
