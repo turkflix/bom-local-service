@@ -25,6 +25,12 @@ public class CacheManagementService : BackgroundService
         _browserService = browserService;
         _configuration = configuration;
         var checkIntervalMinutes = configuration.GetValue<int>("CacheManagement:CheckIntervalMinutes", 5);
+        
+        if (checkIntervalMinutes <= 0 || checkIntervalMinutes > 60)
+        {
+            throw new ArgumentException("CacheManagement:CheckIntervalMinutes must be between 1 and 60", nameof(configuration));
+        }
+        
         _checkInterval = TimeSpan.FromMinutes(checkIntervalMinutes);
     }
 

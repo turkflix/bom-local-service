@@ -19,7 +19,12 @@ public class CacheService : ICacheService
         _logger = logger;
         _configuration = configuration;
         _cacheDirectory = FilePathHelper.GetCacheDirectory(configuration);
-        _cacheExpirationMinutes = configuration.GetValue<double>("CacheExpirationMinutes", 15.5);
+        _cacheExpirationMinutes = configuration.GetValue<double>("CacheExpirationMinutes", 12.5);
+        
+        if (_cacheExpirationMinutes <= 0)
+        {
+            throw new ArgumentException("CacheExpirationMinutes must be greater than 0", nameof(configuration));
+        }
         
         // Ensure cache directory exists
         Directory.CreateDirectory(_cacheDirectory);
@@ -90,7 +95,10 @@ public class CacheService : ICacheService
         string state, 
         CancellationToken cancellationToken = default)
     {
-        var (cacheFolderPath, _) = await GetCachedScreenshotWithMetadataAsync(suburb, state, CachedDataType.Radar, null, cancellationToken);
+        // Exclude active cache folder (currently being written to) to avoid reading incomplete data
+        var locationKey = LocationHelper.GetLocationKey(suburb, state);
+        var excludeFolder = GetActiveCacheFolder(locationKey);
+        var (cacheFolderPath, _) = await GetCachedScreenshotWithMetadataAsync(suburb, state, CachedDataType.Radar, excludeFolder, cancellationToken);
         
         if (string.IsNullOrEmpty(cacheFolderPath) || !Directory.Exists(cacheFolderPath))
         {
@@ -322,6 +330,10 @@ public class CacheService : ICacheService
         string state, 
         CancellationToken cancellationToken = default)
     {
+        // Exclude active cache folder (currently being written to) to avoid reading incomplete data
+        var locationKey = LocationHelper.GetLocationKey(suburb, state);
+        var excludeFolder = GetActiveCacheFolder(locationKey);
+        
         var pattern = FilePathHelper.GetCacheFolderPattern(suburb, state);
         var folders = Directory.GetDirectories(_cacheDirectory, pattern)
             .Select(f =>
@@ -341,6 +353,13 @@ public class CacheService : ICacheService
         {
             if (!Directory.Exists(folder.Folder))
                 continue;
+            
+            // Skip the folder if it's being excluded (currently being written to)
+            if (!string.IsNullOrEmpty(excludeFolder) && Path.GetFullPath(folder.Folder).Equals(Path.GetFullPath(excludeFolder), StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogDebug("Skipping excluded cache folder (being written to): {Folder}", folder.Folder);
+                continue;
+            }
             
             var metadata = await LoadMetadataAsync(folder.Folder, cancellationToken);
             if (metadata == null)
@@ -621,9 +640,7 @@ public class CacheService : ICacheService
         {
             // Cache is invalid/missing - next update would be after background service check
             status.Message = status.CacheExists ? "Cache is stale" : "No cache exists";
-            var now = DateTime.UtcNow;
-            var minutesUntilNextCheck = cacheManagementCheckIntervalMinutes - (now.Minute % cacheManagementCheckIntervalMinutes);
-            status.NextUpdateTime = now.AddMinutes(minutesUntilNextCheck);
+            status.NextUpdateTime = ResponseBuilder.CalculateNextServiceCheck(cacheManagementCheckIntervalMinutes);
         }
         
         return status;

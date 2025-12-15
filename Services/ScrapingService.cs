@@ -15,6 +15,8 @@ public class ScrapingService : IScrapingService
     private readonly int _dynamicContentWaitMs;
     private readonly int _tileRenderWaitMs;
     private readonly ScreenshotCropConfig _cropConfig;
+    private readonly double _cacheExpirationMinutes;
+    private readonly int _cacheManagementCheckIntervalMinutes;
 
     // Selector constants
     private static readonly string[] SearchButtonSelectors = new[]
@@ -67,6 +69,18 @@ public class ScrapingService : IScrapingService
         
         _logger.LogInformation("Screenshot crop config: X={X}, Y={Y}, RightOffset={RightOffset}, Height={Height}",
             _cropConfig.X, _cropConfig.Y, _cropConfig.RightOffset, _cropConfig.Height);
+        
+        _cacheExpirationMinutes = configuration.GetValue<double>("CacheExpirationMinutes", 12.5);
+        _cacheManagementCheckIntervalMinutes = configuration.GetValue<int>("CacheManagement:CheckIntervalMinutes", 5);
+        
+        if (_cacheExpirationMinutes <= 0)
+        {
+            throw new ArgumentException("CacheExpirationMinutes must be greater than 0", nameof(configuration));
+        }
+        if (_cacheManagementCheckIntervalMinutes <= 0 || _cacheManagementCheckIntervalMinutes > 60)
+        {
+            throw new ArgumentException("CacheManagement:CheckIntervalMinutes must be between 1 and 60", nameof(configuration));
+        }
     }
 
     /// <summary>
@@ -544,9 +558,8 @@ public class ScrapingService : IScrapingService
             await _cacheService.SaveFramesMetadataAsync(cacheFolderPath, CachedDataType.Radar, frames, cancellationToken);
 
             // Step 23: Return response with all frames
-            // Note: ScrapingService doesn't have access to cache management check interval
-            // Default to 5 minutes (standard check interval)
-            return ResponseBuilder.CreateRadarResponse(cacheFolderPath, frames, lastUpdatedInfo, suburb, state, cacheIsValid: true, cacheExpiresAt: null, isUpdating: false, cacheManagementCheckIntervalMinutes: 5);
+            var cacheExpiresAt = lastUpdatedInfo.ObservationTime.AddMinutes(_cacheExpirationMinutes);
+            return ResponseBuilder.CreateRadarResponse(cacheFolderPath, frames, lastUpdatedInfo, suburb, state, cacheIsValid: true, cacheExpiresAt: cacheExpiresAt, isUpdating: false, cacheManagementCheckIntervalMinutes: _cacheManagementCheckIntervalMinutes);
         }
         catch (Exception ex)
         {

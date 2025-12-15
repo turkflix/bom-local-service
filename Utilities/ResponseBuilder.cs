@@ -5,6 +5,32 @@ namespace BomLocalService.Utilities;
 public static class ResponseBuilder
 {
     /// <summary>
+    /// Calculates the next time the background cache management service will check for updates.
+    /// Rounds up to the next interval boundary within the current hour, or wraps to next hour if needed.
+    /// </summary>
+    public static DateTime CalculateNextServiceCheck(int checkIntervalMinutes)
+    {
+        var now = DateTime.UtcNow;
+        var currentMinute = now.Minute;
+        
+        // Calculate how many complete intervals have elapsed this hour
+        var intervalsElapsed = currentMinute / checkIntervalMinutes;
+        
+        // Next interval starts at (intervalsElapsed + 1) * checkIntervalMinutes
+        var nextIntervalStartMinute = (intervalsElapsed + 1) * checkIntervalMinutes;
+        
+        // If next interval is beyond 60 minutes, wrap to next hour
+        if (nextIntervalStartMinute >= 60)
+        {
+            // Next check is at the start of next hour (00 minutes)
+            return now.Date.AddHours(now.Hour + 1).AddMinutes(0);
+        }
+        
+        // Next check is within current hour
+        return now.Date.AddHours(now.Hour).AddMinutes(nextIntervalStartMinute);
+    }
+
+    /// <summary>
     /// Creates a RadarResponse from a cache folder path, frames, and metadata
     /// </summary>
     /// <param name="cacheManagementCheckIntervalMinutes">The interval in minutes that the background cache management service checks for updates. Used to calculate NextUpdateTime when cache is invalid.</param>
@@ -44,8 +70,7 @@ public static class ResponseBuilder
         
         // Calculate next background service check time (rounds up to next check interval)
         var now = DateTime.UtcNow;
-        var minutesUntilNextCheck = cacheManagementCheckIntervalMinutes - (now.Minute % cacheManagementCheckIntervalMinutes);
-        var nextServiceCheck = now.AddMinutes(minutesUntilNextCheck);
+        var nextServiceCheck = CalculateNextServiceCheck(cacheManagementCheckIntervalMinutes);
         
         if (isUpdating)
         {

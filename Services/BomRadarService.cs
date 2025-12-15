@@ -30,8 +30,17 @@ public class BomRadarService : IBomRadarService, IDisposable
         _scrapingService = scrapingService;
         _debugService = debugService;
         _configuration = configuration;
-        _cacheExpirationMinutes = configuration.GetValue<double>("CacheExpirationMinutes", 15.5);
+        _cacheExpirationMinutes = configuration.GetValue<double>("CacheExpirationMinutes", 12.5);
         _cacheManagementCheckIntervalMinutes = configuration.GetValue<int>("CacheManagement:CheckIntervalMinutes", 5);
+        
+        if (_cacheExpirationMinutes <= 0)
+        {
+            throw new ArgumentException("CacheExpirationMinutes must be greater than 0", nameof(configuration));
+        }
+        if (_cacheManagementCheckIntervalMinutes <= 0 || _cacheManagementCheckIntervalMinutes > 60)
+        {
+            throw new ArgumentException("CacheManagement:CheckIntervalMinutes must be between 1 and 60", nameof(configuration));
+        }
     }
 
     public async Task<RadarResponse?> GetCachedRadarAsync(string suburb, string state, CancellationToken cancellationToken = default)
@@ -275,11 +284,25 @@ public class BomRadarService : IBomRadarService, IDisposable
                 // Remove from active tracking once complete
                 _cacheService.ClearActiveCacheFolder(locationKey);
                 
-                // Update result with cache state
-                result.IsUpdating = false;
-                result.CacheIsValid = true;
-                result.CacheExpiresAt = result.ObservationTime.AddMinutes(_cacheExpirationMinutes);
-                result.NextUpdateTime = result.CacheExpiresAt;
+                // Update result with cache state - rebuild response to get correct NextUpdateTime calculation
+                var cacheExpiresAt = result.ObservationTime.AddMinutes(_cacheExpirationMinutes);
+                var metadata = new LastUpdatedInfo
+                {
+                    ObservationTime = result.ObservationTime,
+                    ForecastTime = result.ForecastTime,
+                    WeatherStation = result.WeatherStation,
+                    Distance = result.Distance
+                };
+                result = ResponseBuilder.CreateRadarResponse(
+                    cacheFolderPath: newCacheFolderPath,
+                    frames: result.Frames,
+                    metadata: metadata,
+                    suburb: suburb,
+                    state: state,
+                    cacheIsValid: true,
+                    cacheExpiresAt: cacheExpiresAt,
+                    isUpdating: false,
+                    cacheManagementCheckIntervalMinutes: _cacheManagementCheckIntervalMinutes);
                 
                 return result;
             }
