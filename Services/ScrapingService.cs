@@ -223,6 +223,8 @@ public class ScrapingService : IScrapingService
             }
             
             int? matchingIndex = null;
+            int bestMatchScore = -1;
+
             for (int i = 0; i < results.Count; i++)
             {
                 var (name, desc, fullText) = results[i];
@@ -233,16 +235,45 @@ public class ScrapingService : IScrapingService
                 _logger.LogInformation("Checking result {Index}: Name='{Name}', Desc='{Desc}', FullText='{FullText}'", 
                     i, name, desc, fullText.Length > 100 ? fullText.Substring(0, 100) + "..." : fullText);
                 
-                // Check if suburb name matches (from location-name element or fallback to fullText)
+                // Check if suburb name matches with priority scoring
                 var matchesSuburb = false;
+                var matchScore = 0;
+                
                 if (!string.IsNullOrEmpty(name))
                 {
-                    matchesSuburb = nameLower == suburbLower || nameLower.Contains(suburbLower);
+                    if (nameLower == suburbLower)
+                    {
+                        // Exact match - highest priority
+                        matchesSuburb = true;
+                        matchScore = 100;
+                    }
+                    else if (nameLower.StartsWith(suburbLower + " ") || nameLower.StartsWith(suburbLower + "("))
+                    {
+                        // Starts with suburb name (e.g., "Sydney" or "Sydney (Inner)")
+                        matchesSuburb = true;
+                        matchScore = 80;
+                    }
+                    else if (nameLower.Contains("(" + suburbLower + ")") || nameLower.Contains("(" + suburbLower + " "))
+                    {
+                        // Suburb name in parentheses (e.g., "Darlington (Sydney)") - lower priority
+                        matchesSuburb = true;
+                        matchScore = 60;
+                    }
+                    else if (nameLower.Contains(suburbLower))
+                    {
+                        // Contains suburb name anywhere - lowest priority
+                        matchesSuburb = true;
+                        matchScore = 40;
+                    }
                 }
                 else
                 {
                     // Fallback to fullText if name extraction failed
-                    matchesSuburb = fullTextLower.Contains(suburbLower);
+                    if (fullTextLower.Contains(suburbLower))
+                    {
+                        matchesSuburb = true;
+                        matchScore = 20;
+                    }
                 }
                 
                 // Check if state matches (from description which contains "Queensland 4300" or "New South Wales 2469")
@@ -257,15 +288,26 @@ public class ScrapingService : IScrapingService
                     matchesState = StateAbbreviationHelper.MatchesState(fullTextLower, stateLower);
                 }
                 
-                _logger.LogInformation("Result {Index}: matchesSuburb={MatchesSuburb} (suburb='{Suburb}' vs name='{Name}'), matchesState={MatchesState} (state='{State}' vs desc='{Desc}')", 
-                    i, matchesSuburb, suburbLower, nameLower, matchesState, stateLower, descLower);
+                _logger.LogInformation("Result {Index}: matchesSuburb={MatchesSuburb} (score={Score}, suburb='{Suburb}' vs name='{Name}'), matchesState={MatchesState} (state='{State}' vs desc='{Desc}')", 
+                    i, matchesSuburb, matchScore, suburbLower, nameLower, matchesState, stateLower, descLower);
                 
-                if (matchesSuburb && matchesState)
+                // Track the best matching result (highest score)
+                if (matchesSuburb && matchesState && matchScore > bestMatchScore)
                 {
                     matchingIndex = i;
-                    _logger.LogInformation("Found matching result: {Name} - {Desc}", name, desc);
-                    break;
+                    bestMatchScore = matchScore;
+                    _logger.LogInformation("New best match found: {Name} - {Desc} (score: {Score})", name, desc, matchScore);
                 }
+            }
+            
+            // Use the best match found (or first if no match)
+            if (matchingIndex.HasValue)
+            {
+                _logger.LogInformation("Using best matching result at index {Index} with score {Score}", matchingIndex.Value, bestMatchScore);
+            }
+            else
+            {
+                _logger.LogInformation("No exact match found, using first result");
             }
             
             // Click the matching result (or first if no match)
