@@ -1,3 +1,11 @@
+<p align="center">
+  <img
+    src="https://github.com/user-attachments/assets/684b73cd-a374-49e6-aaf1-ccc4c5697b47"
+    width="500"
+    alt="f67325fe-33ae-4fd8-9e57-38b46899d09c"
+  />
+</p>
+
 # BOM Local Service
 
 A local caching service for Australian Bureau of Meteorology (BOM) radar data, designed to provide a reliable API for Home Assistant integrations and other local services.
