@@ -12,6 +12,7 @@ public class ScrapingService : IScrapingService
     private readonly ITimeParsingService _timeParsingService;
     private readonly ICacheService _cacheService;
     private readonly IDebugService _debugService;
+    private readonly IConfiguration _configuration;
     private readonly int _dynamicContentWaitMs;
     private readonly int _tileRenderWaitMs;
     private readonly ScreenshotCropConfig _cropConfig;
@@ -54,6 +55,7 @@ public class ScrapingService : IScrapingService
         _timeParsingService = timeParsingService;
         _cacheService = cacheService;
         _debugService = debugService;
+        _configuration = configuration;
         _dynamicContentWaitMs = configuration.GetValue<int>("Screenshot:DynamicContentWaitMs", 2000);
         _tileRenderWaitMs = configuration.GetValue<int>("Screenshot:TileRenderWaitMs", 5000);
         
@@ -485,9 +487,10 @@ public class ScrapingService : IScrapingService
             }", new PageWaitForFunctionOptions { Timeout = 10000 });
 
             var boundingBox = await mapContainer.BoundingBoxAsync();
-            if (boundingBox == null)
+            if (boundingBox == null || boundingBox.Width <= 0 || boundingBox.Height <= 0)
             {
-                throw new Exception("Could not determine map container bounds");
+                _logger.LogError("Map container has invalid bounds: {BoundingBox}", boundingBox);
+                throw new Exception($"Map container has invalid bounds: {boundingBox?.Width ?? 0}x{boundingBox?.Height ?? 0}");
             }
             
             // Convert BoundingBox to Clip for crop calculation
@@ -503,14 +506,19 @@ public class ScrapingService : IScrapingService
             Directory.CreateDirectory(cacheFolderPath);
             _logger.LogInformation("Using cache folder: {Path}", cacheFolderPath);
 
-            // Step 15-21: Capture all 7 frames
+            // Step 15-21: Capture all frames
+            var frameCount = CacheHelper.GetFrameCountForDataType(_configuration, CachedDataType.Radar);
+            
+            // Track progress: map is ready, starting frame capture
+            _cacheService.RecordUpdateProgressByFolder(cacheFolderPath, CacheUpdatePhase.CapturingFrames, 0, frameCount);
+            
             var frames = new List<RadarFrame>();
             var stepForwardButton = page.Locator("button[data-testid='bom-scrub-utils__right__step-forward']").First;
             int? previousMinutesAgo = null;
 
-            for (int frameIndex = 0; frameIndex < 7; frameIndex++)
+            for (int frameIndex = 0; frameIndex < frameCount; frameIndex++)
             {
-                _logger.LogInformation("Capturing frame {FrameIndex} of 7", frameIndex);
+                _logger.LogInformation("Capturing frame {FrameIndex} of {FrameCount}", frameIndex, frameCount);
                 
                 // Wait for map to stabilize (tiles to load for current frame)
                 await page.WaitForTimeoutAsync(_tileRenderWaitMs);
@@ -565,11 +573,14 @@ public class ScrapingService : IScrapingService
                 _logger.LogInformation("Frame {FrameIndex} saved: {Path} ({MinutesAgo} minutes ago)", 
                     frameIndex, framePath, minutesAgo.Value);
                 
+                // Track progress: frame captured
+                _cacheService.RecordUpdateProgressByFolder(cacheFolderPath, CacheUpdatePhase.CapturingFrames, frameIndex + 1, frameCount);
+                
                 // Save debug screenshot BEFORE clicking step forward
                 await _debugService.SaveStepDebugAsync(debugFolder, 15 + frameIndex, $"frame_{frameIndex}_captured", page, consoleMessages, networkRequests, cancellationToken);
                 
                 // If not the last frame, click step forward to prepare for next frame
-                if (frameIndex < 6)
+                if (frameIndex < frameCount - 1)
                 {
                     // Dismiss any modal overlays (BOM, reCAPTCHA, feedback forms) before clicking
                     await DismissModalOverlaysAsync(page);
@@ -593,15 +604,18 @@ public class ScrapingService : IScrapingService
                 }
             }
 
-            _logger.LogInformation("All 7 frames captured successfully");
+            _logger.LogInformation("All {FrameCount} frames captured successfully", frameCount);
 
             // Step 22: Save metadata and frame information
+            // Track progress: switching to saving phase
+            _cacheService.RecordUpdateProgressByFolder(cacheFolderPath, CacheUpdatePhase.Saving);
+            
             await _cacheService.SaveMetadataAsync(cacheFolderPath, lastUpdatedInfo, cancellationToken);
             await _cacheService.SaveFramesMetadataAsync(cacheFolderPath, CachedDataType.Radar, frames, cancellationToken);
 
             // Step 23: Return response with all frames
             var cacheExpiresAt = lastUpdatedInfo.ObservationTime.AddMinutes(_cacheExpirationMinutes);
-            return ResponseBuilder.CreateRadarResponse(cacheFolderPath, frames, lastUpdatedInfo, suburb, state, cacheIsValid: true, cacheExpiresAt: cacheExpiresAt, isUpdating: false, cacheManagementCheckIntervalMinutes: _cacheManagementCheckIntervalMinutes);
+            return ResponseBuilder.CreateRadarResponse(cacheFolderPath, frames, _cacheManagementCheckIntervalMinutes, lastUpdatedInfo, suburb, state, cacheIsValid: true, cacheExpiresAt: cacheExpiresAt, isUpdating: false);
         }
         catch (Exception ex)
         {
@@ -888,6 +902,14 @@ public class ScrapingService : IScrapingService
     /// </summary>
     private async Task CaptureMapScreenshotAsync(IPage page, ILocator mapContainer, string outputPath, Clip containerClip)
     {
+        // First, validate container clip itself
+        if (containerClip == null || containerClip.Width <= 0 || containerClip.Height <= 0)
+        {
+            _logger.LogError("Invalid container bounds: X={X}, Y={Y}, Width={Width}, Height={Height}", 
+                containerClip?.X ?? 0, containerClip?.Y ?? 0, containerClip?.Width ?? 0, containerClip?.Height ?? 0);
+            throw new Exception($"Invalid container bounds: {containerClip?.Width ?? 0}x{containerClip?.Height ?? 0}");
+        }
+        
         Clip cropArea;
         try
         {
@@ -901,22 +923,90 @@ public class ScrapingService : IScrapingService
             cropArea = containerClip;
         }
         
-        // Validate crop area is within page bounds before attempting screenshot
+        // Get viewport size - if null, try to get it from page evaluation as fallback
         var viewportSize = page.ViewportSize;
-        if (viewportSize == null || cropArea.X < 0 || cropArea.Y < 0 || 
-            cropArea.X + cropArea.Width > viewportSize.Width || 
-            cropArea.Y + cropArea.Height > viewportSize.Height)
+        int? viewportWidth = viewportSize?.Width;
+        int? viewportHeight = viewportSize?.Height;
+        
+        if (viewportWidth == null || viewportHeight == null)
         {
-            _logger.LogWarning("Crop area is outside viewport bounds, using full container. Crop: X={X}, Y={Y}, Width={Width}, Height={Height}, Viewport: {ViewportWidth}x{ViewportHeight}", 
-                cropArea.X, cropArea.Y, cropArea.Width, cropArea.Height, viewportSize?.Width ?? 0, viewportSize?.Height ?? 0);
-            cropArea = containerClip;
+            try
+            {
+                var viewportJson = await page.EvaluateAsync<string>("() => JSON.stringify({ width: window.innerWidth, height: window.innerHeight })");
+                if (!string.IsNullOrEmpty(viewportJson))
+                {
+                    using var doc = System.Text.Json.JsonDocument.Parse(viewportJson);
+                    var root = doc.RootElement;
+                    if (root.TryGetProperty("width", out var widthProp) && root.TryGetProperty("height", out var heightProp))
+                    {
+                        if (widthProp.TryGetInt32(out var width) && heightProp.TryGetInt32(out var height))
+                        {
+                            viewportWidth = width;
+                            viewportHeight = height;
+                            _logger.LogDebug("Retrieved viewport size from page evaluation: {Width}x{Height}", width, height);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to get viewport size from page evaluation");
+            }
+            
+            // If still can't get it, use container bounds as fallback for validation
+            if (viewportWidth == null || viewportHeight == null)
+            {
+                _logger.LogWarning("Cannot determine viewport size, using container bounds for validation");
+                viewportWidth = (int)containerClip.Width;
+                viewportHeight = (int)containerClip.Height;
+            }
+        }
+        
+        // Validate crop area is within page bounds and adjust if necessary
+        if (viewportWidth.HasValue && viewportHeight.HasValue)
+        {
+            // Ensure crop area coordinates are non-negative
+            if (cropArea.X < 0)
+            {
+                _logger.LogWarning("Crop X is negative ({X}), adjusting to 0", cropArea.X);
+                cropArea = new Clip { X = 0, Y = cropArea.Y, Width = cropArea.Width + cropArea.X, Height = cropArea.Height };
+            }
+            if (cropArea.Y < 0)
+            {
+                _logger.LogWarning("Crop Y is negative ({Y}), adjusting to 0", cropArea.Y);
+                cropArea = new Clip { X = cropArea.X, Y = 0, Width = cropArea.Width, Height = cropArea.Height + cropArea.Y };
+            }
+            
+            // Ensure crop area doesn't exceed viewport bounds
+            if (cropArea.X + cropArea.Width > viewportWidth.Value)
+            {
+                var newWidth = viewportWidth.Value - cropArea.X;
+                _logger.LogWarning("Crop width exceeds viewport ({Requested} > {Max}), adjusting to {NewWidth}", 
+                    cropArea.Width, viewportWidth.Value, newWidth);
+                cropArea = new Clip { X = cropArea.X, Y = cropArea.Y, Width = newWidth, Height = cropArea.Height };
+            }
+            if (cropArea.Y + cropArea.Height > viewportHeight.Value)
+            {
+                var newHeight = viewportHeight.Value - cropArea.Y;
+                _logger.LogWarning("Crop height exceeds viewport ({Requested} > {Max}), adjusting to {NewHeight}", 
+                    cropArea.Height, viewportHeight.Value, newHeight);
+                cropArea = new Clip { X = cropArea.X, Y = cropArea.Y, Width = cropArea.Width, Height = newHeight };
+            }
         }
         
         // Final validation - ensure dimensions are positive
         if (cropArea.Width <= 0 || cropArea.Height <= 0)
         {
-            _logger.LogError("Invalid crop dimensions: {Width}x{Height}, using full container", cropArea.Width, cropArea.Height);
+            _logger.LogError("Invalid crop dimensions after validation: {Width}x{Height}, using full container", cropArea.Width, cropArea.Height);
             cropArea = containerClip;
+        }
+        
+        // Double-check container clip is still valid as final fallback
+        if (cropArea.Width <= 0 || cropArea.Height <= 0)
+        {
+            _logger.LogError("Cannot create valid crop area. Container: {ContainerWidth}x{ContainerHeight}, Viewport: {ViewportWidth}x{ViewportHeight}", 
+                containerClip.Width, containerClip.Height, viewportWidth ?? 0, viewportHeight ?? 0);
+            throw new Exception($"Cannot create valid crop area. Container: {containerClip.Width}x{containerClip.Height}, Viewport: {viewportWidth ?? 0}x{viewportHeight ?? 0}");
         }
         
         // Wait for fonts to be loaded to prevent text rendering artifacts

@@ -736,7 +736,10 @@
                 <div class="info-card">
                     <h3>Cache & Update Status</h3>
                     <div class="value" id="cache-status">Checking...</div>
-                    <div class="timestamp" id="update-status-detail"></div>
+                    <div class="timestamp" id="update-status-detail" style="cursor: help;"></div>
+                    <div style="font-size: 0.85em; color: #666; margin-top: 5px; font-style: italic;">
+                        <span id="estimation-note" style="display: none;">Estimates improve as metrics are collected from completed updates</span>
+                    </div>
                 </div>
                 
                 <div class="info-card">
@@ -1034,10 +1037,23 @@
                 }
                 
                 // Update update status detail with relative time
+                const estimationNoteEl = document.getElementById('estimation-note');
                 if (radarData.isUpdating && radarData.nextUpdateTime && updateStatusDetailEl) {
-                    updateStatusDetailEl.textContent = 'Estimated completion: ' + formatDate(radarData.nextUpdateTime) + ' (' + getRelativeTime(radarData.nextUpdateTime) + ')';
+                    const relativeTime = getRelativeTime(radarData.nextUpdateTime);
+                    updateStatusDetailEl.textContent = 'Update in progress • Estimated completion: ' + formatDate(radarData.nextUpdateTime) + ' (' + relativeTime + ')';
+                    updateStatusDetailEl.title = 'Estimate is based on historical metrics and current progress. Accuracy improves as more updates complete.';
+                    if (estimationNoteEl) estimationNoteEl.style.display = 'inline';
                 } else if (!radarData.cacheIsValid && !radarData.isUpdating && radarData.nextUpdateTime && updateStatusDetailEl) {
-                    updateStatusDetailEl.textContent = 'Update scheduled: ' + formatDate(radarData.nextUpdateTime) + ' (' + getRelativeTime(radarData.nextUpdateTime) + ')';
+                    const relativeTime = getRelativeTime(radarData.nextUpdateTime);
+                    updateStatusDetailEl.textContent = 'Update scheduled: ' + formatDate(radarData.nextUpdateTime) + ' (' + relativeTime + ')';
+                    updateStatusDetailEl.title = 'Estimated time when cache update will be triggered or completed. Based on metrics from previous updates.';
+                    if (estimationNoteEl) estimationNoteEl.style.display = 'inline';
+                } else if (radarData.cacheIsValid && updateStatusDetailEl) {
+                    updateStatusDetailEl.textContent = 'Cache is valid, no update needed';
+                    updateStatusDetailEl.title = '';
+                    if (estimationNoteEl) estimationNoteEl.style.display = 'none';
+                } else {
+                    if (estimationNoteEl) estimationNoteEl.style.display = 'none';
                 }
                 
                 // Update next client check time
@@ -1121,19 +1137,17 @@
                 });
                 
                 if (!response.ok) {
-                    const errorData = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+                    const errorData = await response.json().catch(() => ({ message: `HTTP ${response.status}` }));
                     
-                    // Handle 400 Bad Request (e.g., time range too large)
+                    // Handle 400 Bad Request (e.g., time range too large, validation errors)
                     if (response.status === 400) {
-                        const errorMessage = errorData.error || 'Invalid request';
+                        const errorMessage = errorData.message || 'Invalid request';
                         let details = '';
-                        if (errorData.requestedHours && errorData.maxHours) {
-                            details = ` Requested: ${errorData.requestedHours.toFixed(1)} hours, Maximum: ${errorData.maxHours} hours.`;
-                            if (errorData.cacheRetentionHours) {
-                                details += ` (Limit is based on cache retention: ${errorData.cacheRetentionHours} hours)`;
-                            }
-                            if (errorData.configuredMaxHours) {
-                                details += ` (Override configured: ${errorData.configuredMaxHours} hours)`;
+                        // Check if it's a time range error with details
+                        if (errorData.errorCode === 'TIME_RANGE_ERROR' && errorData.details?.requestedRange) {
+                            const requested = errorData.details.requestedRange;
+                            if (requested.requestedHours && errorData.details.maxHours) {
+                                details = ` Requested: ${requested.requestedHours.toFixed(1)} hours, Maximum: ${errorData.details.maxHours} hours.`;
                             }
                         }
                         throw new Error(errorMessage + details);
@@ -1141,11 +1155,11 @@
                     
                     // Handle 404 Not Found
                     if (response.status === 404) {
-                        // Check if this is "location doesn't exist" vs "no data in range"
-                        if (errorData.updateTriggered !== undefined || errorData.cacheExists !== undefined) {
+                        // Check error code to determine type
+                        if (errorData.errorCode === 'CACHE_NOT_FOUND') {
                             // Location doesn't exist - trigger cache update if endpoint provided
-                            if (errorData.refreshEndpoint) {
-                                fetch(errorData.refreshEndpoint, {
+                            if (errorData.suggestions?.refreshEndpoint) {
+                                fetch(errorData.suggestions.refreshEndpoint, {
                                     method: 'POST',
                                     signal: AbortSignal.timeout(5000)
                                 }).catch(err => {
@@ -1157,25 +1171,37 @@
                             return { 
                                 frames: null, 
                                 error: 'location_missing',
-                                cacheStatus: errorData
+                                cacheStatus: errorData.details || errorData
                             };
-                        } else if (errorData.availableRange) {
+                        } else if (errorData.errorCode === 'TIME_RANGE_ERROR' && errorData.details?.availableRange) {
                             // Cache exists but no data in requested range
-                            const availableRange = errorData.availableRange;
-                            const rangeMessage = availableRange.oldest && availableRange.newest ?
-                                ` Available data: ${formatDate(availableRange.oldest)} to ${formatDate(availableRange.newest)}.` :
-                                availableRange.totalCacheFolders > 0 ?
-                                    ` ${availableRange.totalCacheFolders} cache folders available.` : '';
+                            const availableRange = errorData.details.availableRange;
+                            let rangeMessage = '';
                             
-                            throw new Error((errorData.error || 'No data in requested range') + rangeMessage);
+                            // Use suggested range from error response if available
+                            if (errorData.suggestions?.suggestedRange) {
+                                const suggested = errorData.suggestions.suggestedRange;
+                                rangeMessage = ` Suggested range: ${formatDate(suggested.start)} to ${formatDate(suggested.end)}.`;
+                            } else if (availableRange.oldest && availableRange.newest) {
+                                rangeMessage = ` Available data: ${formatDate(availableRange.oldest)} to ${formatDate(availableRange.newest)}.`;
+                            } else if (availableRange.totalCacheFolders > 0) {
+                                rangeMessage = ` ${availableRange.totalCacheFolders} cache folders available.`;
+                            }
+                            
+                            // Include suggestion text if provided
+                            if (errorData.suggestions?.suggestion) {
+                                rangeMessage += ` ${errorData.suggestions.suggestion}`;
+                            }
+                            
+                            throw new Error(errorData.message + rangeMessage);
                         } else {
                             // Generic 404
-                            throw new Error(errorData.error || 'No historical data found');
+                            throw new Error(errorData.message || 'No historical data found');
                         }
                     }
                     
                     // Other errors
-                    throw new Error(errorData.error || 'Failed to fetch historical radar');
+                    throw new Error(errorData.message || 'Failed to fetch historical radar');
                 }
                 
                 const data = await response.json();
@@ -1427,7 +1453,7 @@
                     });
                     
                     if (!response.ok) {
-                        const error = await response.json().catch(() => ({ error: `HTTP ${response.status}: ${response.statusText}` }));
+                        const error = await response.json().catch(() => ({ message: `HTTP ${response.status}: ${response.statusText}` }));
                         
                         // Handle 404 more gracefully - cache is being generated
                         if (response.status === 404) {
@@ -1446,10 +1472,12 @@
                                 updateApiStatus('connected');
                             }
                             
+                            // Use standardized error response format
                             // Explicitly trigger cache refresh if refreshEndpoint is provided
-                            if (errorData.refreshEndpoint) {
+                            const refreshEndpoint = errorData.suggestions?.refreshEndpoint || errorData.refreshEndpoint;
+                            if (refreshEndpoint) {
                                 // Trigger cache update in background (fire and forget)
-                                fetch(errorData.refreshEndpoint, {
+                                fetch(refreshEndpoint, {
                                     method: 'POST',
                                     signal: AbortSignal.timeout(5000)
                                 }).catch(err => {
@@ -1458,26 +1486,24 @@
                             }
                             
                             // Use actual cache status from API if available
-                            // Determine if update is in progress: UpdateTriggered=true OR Message indicates update in progress
-                            if (errorData.updateTriggered !== undefined || errorData.cacheIsValid !== undefined || errorData.cacheExists !== undefined) {
+                            // Check both new format (details) and old format for backward compatibility
+                            const details = errorData.details || errorData;
+                            if (details.updateTriggered !== undefined || details.cacheIsValid !== undefined || details.cacheExists !== undefined) {
                                 // Determine if update is in progress
-                                const isUpdating = errorData.updateTriggered === true || 
-                                                 (errorData.message && errorData.message.includes('in progress'));
+                                const isUpdating = details.updateTriggered === true || 
+                                                 (errorData.message && errorData.message.includes('in progress')) ||
+                                                 (details.statusMessage && details.statusMessage.includes('in progress'));
                                 
                                 // Create a data-like object with cache status for updateUI
                                 const cacheStatusData = {
                                     frames: [],
                                     isUpdating: isUpdating,
-                                    cacheIsValid: errorData.cacheIsValid || false,
-                                    cacheExpiresAt: errorData.cacheExpiresAt || null,
-                                    nextUpdateTime: errorData.nextUpdateTime || null
+                                    cacheIsValid: details.cacheIsValid || false,
+                                    cacheExpiresAt: details.cacheExpiresAt || null,
+                                    nextUpdateTime: details.nextUpdateTime || null
                                 };
                                 console.debug('Updating UI with cache status from 404:', cacheStatusData);
                                 updateUI(cacheStatusData);
-                            } else if (errorData.retryAfter) {
-                                // Fallback to old method if cache status not available
-                                console.debug('Cache status not in 404 response, using fallback method');
-                                updateStatusForCacheUpdate(errorData.retryAfter, errorData.refreshEndpoint);
                             } else {
                                 // No cache status info at all - set default updating status
                                 console.debug('No cache status info available, setting default updating status');
@@ -1489,11 +1515,13 @@
                                 updateUI(defaultStatusData);
                             }
                             
-                            showNoFramesMessage(`Cache is being generated. Please wait ${errorData.retryAfter || 30} seconds and refresh.`, errorData.refreshEndpoint);
+                            const retryAfter = errorData.suggestions?.retryAfter || errorData.retryAfter || 30;
+                            const message = errorData.message || `Cache is being generated. Please wait ${retryAfter} seconds and refresh.`;
+                            showNoFramesMessage(message, refreshEndpoint);
                             return null;
                         }
                         
-                        throw new Error(error.error || 'Failed to fetch radar data');
+                        throw new Error(error.message || error.error || 'Failed to fetch radar data');
                     }
                     
                     const data = await response.json();
@@ -1704,20 +1732,33 @@
                 
                 // Update update status detail (now shown below cache status in combined card)
                 const updateStatusDetailEl = document.getElementById('update-status-detail');
+                const estimationNoteEl = document.getElementById('estimation-note');
                 if (data.isUpdating !== undefined || data.cacheIsValid !== undefined) {
                     if (data.isUpdating) {
                         if (data.nextUpdateTime) {
-                            updateStatusDetailEl.textContent = 'Estimated completion: ' + formatDate(data.nextUpdateTime) + ' (' + getRelativeTime(data.nextUpdateTime) + ')';
+                            const relativeTime = getRelativeTime(data.nextUpdateTime);
+                            updateStatusDetailEl.textContent = 'Update in progress • Estimated completion: ' + formatDate(data.nextUpdateTime) + ' (' + relativeTime + ')';
+                            updateStatusDetailEl.title = 'Estimate is based on historical metrics and current progress. Accuracy improves as more updates complete.';
+                            if (estimationNoteEl) estimationNoteEl.style.display = 'inline';
                         } else {
                             updateStatusDetailEl.textContent = 'Update in progress, please wait...';
+                            updateStatusDetailEl.title = 'Cache update is in progress. Completion time will be estimated once progress tracking begins.';
+                            if (estimationNoteEl) estimationNoteEl.style.display = 'none';
                         }
                     } else if (data.cacheIsValid) {
-                        updateStatusDetailEl.textContent = 'No update needed';
+                        updateStatusDetailEl.textContent = 'Cache is valid, no update needed';
+                        updateStatusDetailEl.title = '';
+                        if (estimationNoteEl) estimationNoteEl.style.display = 'none';
                     } else {
                         if (data.nextUpdateTime) {
-                            updateStatusDetailEl.textContent = 'Update scheduled: ' + formatDate(data.nextUpdateTime) + ' (' + getRelativeTime(data.nextUpdateTime) + ')';
+                            const relativeTime = getRelativeTime(data.nextUpdateTime);
+                            updateStatusDetailEl.textContent = 'Update scheduled: ' + formatDate(data.nextUpdateTime) + ' (' + relativeTime + ')';
+                            updateStatusDetailEl.title = 'Estimated time when cache update will be triggered or completed. Based on metrics from previous updates.';
+                            if (estimationNoteEl) estimationNoteEl.style.display = 'inline';
                         } else {
                             updateStatusDetailEl.textContent = 'Update will be triggered by background service';
+                            updateStatusDetailEl.title = 'The background cache management service will check and update the cache periodically.';
+                            if (estimationNoteEl) estimationNoteEl.style.display = 'none';
                         }
                     }
                 }

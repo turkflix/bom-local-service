@@ -350,10 +350,56 @@ GET /api/radar/{suburb}/{state}
 }
 ```
 
+**Response Fields:**
+- `frames`: Array of radar frame objects with image URLs and timing information
+- `observationTime`: UTC timestamp when the observation was made
+- `forecastTime`: UTC timestamp for the forecast
+- `weatherStation`: Name of the weather station
+- `distance`: Distance from location to weather station
+- `cacheIsValid`: Whether the cache is still valid (not expired)
+- `cacheExpiresAt`: UTC timestamp when the cache expires
+- `isUpdating`: Whether a cache update is currently in progress
+- `nextUpdateTime`: **Estimated** UTC timestamp for when the cache will be updated or when an in-progress update will complete. This value is calculated using:
+  - **Metrics-based estimation** (preferred): When historical data is available, uses median durations from previous cache updates to provide hardware-adaptive estimates
+  - **Calculated estimation** (fallback): When no metrics are available yet (e.g., first update), calculates based on configured wait times and frame count
+  - **Progress-aware**: During active updates, estimates improve as progress is tracked through phases (Initializing → CapturingFrames → Saving)
+
 **Status Codes:**
 - `200 OK`: Radar data available
 - `404 Not Found`: Cache is being generated (check response for retry information)
+  ```json
+  {
+    "errorCode": "CACHE_NOT_FOUND",
+    "errorType": "CacheError",
+    "message": "No cached data found for this location (fresh start). Cache update has been triggered in background.",
+    "details": {
+      "location": { "suburb": "Brisbane", "state": "QLD" },
+      "cacheExists": false,
+      "cacheIsValid": false,
+      "updateTriggered": true,
+      "nextUpdateTime": "2025-01-15T10:12:30Z"
+    },
+    "suggestions": {
+      "action": "retry_after_seconds",
+      "retryAfter": 30,
+      "refreshEndpoint": "/api/cache/Brisbane/QLD/refresh"
+    },
+    "note": "The retryAfter value is dynamically calculated based on the estimated cache update duration. On first startup with no cache, it uses a calculated estimate. After metrics are collected from completed updates, it uses hardware-adaptive estimates based on actual performance."
+    "timestamp": "2025-01-15T10:00:00Z"
+  }
+  ```
 - `400 Bad Request`: Invalid location parameters
+  ```json
+  {
+    "errorCode": "VALIDATION_ERROR",
+    "errorType": "ValidationError",
+    "message": "Invalid state abbreviation. Use: NSW, VIC, QLD, SA, WA, TAS, NT, ACT",
+    "details": {
+      "field": "state"
+    },
+    "timestamp": "2025-01-15T10:00:00Z"
+  }
+  ```
 
 #### Get Frame Image
 
@@ -372,6 +418,23 @@ GET /api/radar/{suburb}/{state}/frame/{frameIndex}
 **Response:**
 - `200 OK`: PNG image
 - `404 Not Found`: Frame not found
+  ```json
+  {
+    "errorCode": "NOT_FOUND",
+    "errorType": "NotFoundError",
+    "message": "Frame 3 not found for Brisbane, QLD",
+    "details": {
+      "resourceType": "Frame",
+      "identifier": "Frame 3 for Brisbane, QLD",
+      "frameIndex": 3,
+      "location": { "suburb": "Brisbane", "state": "QLD" }
+    },
+    "suggestions": {
+      "suggestion": "The frame may not exist yet. Try refreshing the cache or checking if cache update is in progress."
+    },
+    "timestamp": "2025-01-15T10:00:00Z"
+  }
+  ```
 
 #### Get Metadata
 
@@ -433,36 +496,89 @@ GET /api/radar/{suburb}/{state}/timeseries?startTime={iso8601}&endTime={iso8601}
 **Status Codes:**
 - `200 OK`: Historical data available
 - `400 Bad Request`: Invalid request (e.g., time range exceeds maximum allowed duration, invalid time format, startTime after endTime)
-- `404 Not Found`: 
-  - **Location not cached**: No cache exists for this location. Cache update is triggered in background. Response includes cache status:
+  - **Invalid time format**:
     ```json
     {
-      "error": "No cached data found for this location. Cache update has been triggered in background. Please retry in a few moments.",
-      "retryAfter": 30,
-      "refreshEndpoint": "/api/cache/Brisbane/QLD/refresh",
-      "updateTriggered": true,
-      "cacheExists": false,
-      "cacheIsValid": false,
-      "cacheExpiresAt": null,
-      "nextUpdateTime": "2025-01-15T10:12:30Z",
-      "message": "No cache exists, update triggered"
+      "errorCode": "VALIDATION_ERROR",
+      "errorType": "ValidationError",
+      "message": "Invalid startTime format. Use ISO 8601 format (e.g., 2025-12-07T00:00:00Z)",
+      "details": {
+        "field": "startTime"
+      },
+      "timestamp": "2025-01-15T10:00:00Z"
     }
     ```
-  - **No data in range**: Cache exists but no data in the requested time range. Response includes available cache range:
+  - **Time range exceeds maximum**:
     ```json
     {
-      "error": "No historical data found for the specified time range.",
-      "availableRange": {
-        "oldest": "2025-01-15T08:00:00Z",
-        "newest": "2025-01-15T10:00:00Z",
-        "totalCacheFolders": 10,
-        "timeSpanMinutes": 120
+      "errorCode": "TIME_RANGE_ERROR",
+      "errorType": "ValidationError",
+      "message": "Time range exceeds maximum allowed duration of 24 hours (based on cache retention: 24 hours). Please specify a smaller range.",
+      "details": {
+        "requestedRange": {
+          "start": "2025-01-15T00:00:00Z",
+          "end": "2025-01-15T25:00:00Z",
+          "requestedHours": 25.0
+        }
       },
-      "requestedRange": {
-        "start": "2025-01-15T00:00:00Z",
-        "end": "2025-01-15T10:00:00Z"
+      "suggestions": {
+        "action": "adjust_time_range"
       },
-      "suggestion": "Try adjusting the time range to match the available cached data."
+      "timestamp": "2025-01-15T10:00:00Z"
+    }
+    ```
+- `404 Not Found`: 
+  - **Location not cached**: No cache exists for this location. Cache update is triggered in background:
+    ```json
+    {
+      "errorCode": "CACHE_NOT_FOUND",
+      "errorType": "CacheError",
+      "message": "No cached data found for this location. Cache update has been triggered in background.",
+      "details": {
+        "location": { "suburb": "Brisbane", "state": "QLD" },
+        "cacheExists": false,
+        "cacheIsValid": false,
+        "updateTriggered": true,
+        "cacheExpiresAt": null,
+        "nextUpdateTime": "2025-01-15T10:12:30Z",
+        "statusMessage": "No cache exists, update triggered"
+      },
+      "suggestions": {
+        "action": "retry_after_seconds",
+        "retryAfter": 30,
+        "refreshEndpoint": "/api/cache/Brisbane/QLD/refresh",
+        "statusEndpoint": "/api/cache/Brisbane/QLD/range"
+      },
+      "timestamp": "2025-01-15T10:00:00Z"
+    }
+    ```
+  - **No data in range**: Cache exists but no data in the requested time range:
+    ```json
+    {
+      "errorCode": "TIME_RANGE_ERROR",
+      "errorType": "ValidationError",
+      "message": "No historical data found for the specified time range.",
+      "details": {
+        "availableRange": {
+          "oldest": "2025-01-15T08:00:00Z",
+          "newest": "2025-01-15T10:00:00Z",
+          "totalCacheFolders": 10,
+          "timeSpanMinutes": 120
+        },
+        "requestedRange": {
+          "start": "2025-01-15T00:00:00Z",
+          "end": "2025-01-15T10:00:00Z"
+        }
+      },
+      "suggestions": {
+        "action": "adjust_time_range",
+        "suggestedRange": {
+          "start": "2025-01-15T08:00:00Z",
+          "end": "2025-01-15T10:00:00Z"
+        },
+        "suggestion": "Try querying data between 2025-01-15T08:00:00Z and 2025-01-15T10:00:00Z"
+      },
+      "timestamp": "2025-01-15T10:00:00Z"
     }
     ```
 
@@ -470,6 +586,45 @@ GET /api/radar/{suburb}/{state}/timeseries?startTime={iso8601}&endTime={iso8601}
 - Maximum time range is configurable via `TimeSeries:MaxTimeRangeHours` (defaults to `CacheRetentionHours` or minimum 24 hours)
 - If `TimeSeries:MaxTimeRangeHours` is not set, the limit automatically matches your `CacheRetentionHours` setting
 - This ensures you can always query all available cached data (e.g., if retention is 72 hours, you can query up to 72 hours)
+
+### Error Response Format
+
+All API endpoints return standardized error responses using the `ApiErrorResponse` format:
+
+```json
+{
+  "errorCode": "CACHE_NOT_FOUND",
+  "errorType": "CacheError",
+  "message": "Human-readable error message",
+  "details": {
+    "location": { "suburb": "Brisbane", "state": "QLD" },
+    "cacheExists": false,
+    "cacheIsValid": false
+  },
+  "suggestions": {
+    "action": "retry_after_seconds",
+    "retryAfter": 30,
+    "refreshEndpoint": "/api/cache/Brisbane/QLD/refresh"
+  },
+  "timestamp": "2025-01-15T10:00:00Z"
+}
+```
+
+**Error Response Fields:**
+- `errorCode`: Machine-readable error code (e.g., `CACHE_NOT_FOUND`, `VALIDATION_ERROR`, `TIME_RANGE_ERROR`)
+- `errorType`: Error category (`CacheError`, `ValidationError`, `ServiceError`, `NotFoundError`)
+- `message`: Human-readable error description
+- `details`: Additional context (varies by error type)
+- `suggestions`: Actionable guidance (retry times, endpoints, etc.)
+- `timestamp`: UTC timestamp when error occurred
+
+**Common Error Codes:**
+- `CACHE_NOT_FOUND`: No cached data exists for the location (fresh start scenario)
+- `VALIDATION_ERROR`: Invalid request parameters
+- `TIME_RANGE_ERROR`: Time range validation failed or no data in range
+- `NOT_FOUND`: Specific resource not found (e.g., frame, metadata)
+- `CACHE_UPDATE_FAILED`: Cache update operation failed
+- `INTERNAL_ERROR`: Server-side error occurred
 - If no time range is specified, returns all available historical data
 - **Note**: `CacheRetentionHours` can be set to any positive integer value (24, 48, 72, 168, etc.)
 
@@ -516,6 +671,11 @@ POST /api/cache/{suburb}/{state}/refresh
 }
 ```
 
+**Note on `nextUpdateTime`**: The estimated completion time is calculated using:
+- **Metrics-based estimation**: Uses historical median durations from previous cache updates (more accurate, hardware-adaptive)
+- **Calculated estimation**: Falls back to calculated estimates based on configuration when no metrics are available yet
+- Estimates improve in real-time as the update progresses through phases (Initializing → CapturingFrames → Saving)
+
 #### Delete Cache
 
 Delete cached data for a location.
@@ -537,6 +697,49 @@ When running in Development mode, OpenAPI documentation is available at:
 ```
 http://localhost:8082/openapi/v1.json
 ```
+
+## Cache Update Estimation
+
+The service uses a **metrics-based estimation system** to provide accurate estimates of cache update completion times. This ensures clients receive meaningful `nextUpdateTime` values that adapt to the actual hardware performance.
+
+### How It Works
+
+1. **Progress Tracking**: During cache updates, the service tracks progress through three phases:
+   - **Initializing**: Browser setup, navigation, and page loading (~0-20% of total time)
+   - **CapturingFrames**: Frame capture loop (~20-95% of total time)
+   - **Saving**: Metadata and cleanup operations (~95-100% of total time)
+
+2. **Metrics Collection**: After each successful cache update, the service records:
+   - Total duration of the update
+   - Duration of each phase
+   - Frame-level progress during capture
+
+3. **Estimation Strategy**:
+   - **Metrics-based** (preferred): Uses median durations from the last 20 completed updates to provide hardware-adaptive estimates
+   - **Progress-aware**: During active updates, estimates improve in real-time based on current phase and frame progress
+   - **Calculated fallback**: When no metrics are available (e.g., first update), falls back to calculated estimates based on configuration values
+
+4. **Benefits**:
+   - **Hardware-adaptive**: Estimates automatically adjust to slower/faster hardware
+   - **Improves over time**: More accurate estimates as more updates complete
+   - **Real-time refinement**: Estimates become more precise as updates progress
+   - **Works from clean start**: Provides reasonable estimates even on first run
+
+### Example Scenarios
+
+**First Update (No Metrics)**:
+- Uses calculated estimate based on `Screenshot:DynamicContentWaitMs`, `Screenshot:TileRenderWaitMs`, and frame count
+- Example: ~120 seconds for 7 frames with default settings
+
+**Subsequent Updates (With Metrics)**:
+- Uses median duration from historical data
+- Example: If previous updates averaged 95 seconds, estimates will use ~95 seconds (with buffer)
+
+**In-Progress Update**:
+- If capturing frame 3 of 7, estimates remaining time based on:
+  - Average frame duration from historical data
+  - Remaining frames (4 frames × avg frame duration)
+  - Plus estimated time for saving phase
 
 ## Demo SPA
 
@@ -590,15 +793,23 @@ async function getRadarData(suburb, state) {
     if (response.status === 404) {
         // Cache is being generated - trigger refresh and show message
         const error = await response.json();
-        if (error.refreshEndpoint) {
+        
+        // Use standardized error response format
+        if (error.errorCode === 'CACHE_NOT_FOUND' && error.suggestions?.refreshEndpoint) {
             // Trigger cache update in background
-            fetch(error.refreshEndpoint, { method: 'POST' }).catch(() => {});
+            fetch(error.suggestions.refreshEndpoint, { method: 'POST' }).catch(() => {});
         }
-        return { frames: [], message: `Cache being generated. Retry in ${error.retryAfter} seconds.` };
+        
+        const retryAfter = error.suggestions?.retryAfter || 30;
+        return { 
+            frames: [], 
+            message: error.message || `Cache being generated. Retry in ${retryAfter} seconds.` 
+        };
     }
     
     if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
+        const error = await response.json().catch(() => ({ message: `HTTP ${response.status}` }));
+        throw new Error(error.message || `HTTP ${response.status}`);
     }
     
     return await response.json();
@@ -633,29 +844,32 @@ async function getHistoricalRadar(suburb, state, hoursBack = 3) {
     
     if (response.status === 400) {
         const error = await response.json();
-        // Error will include maxHours and cacheRetentionHours for context
-        throw new Error(error.error || 'Invalid time range request');
+        // Use standardized error format
+        throw new Error(error.message || 'Invalid time range request');
     }
     
     if (response.status === 404) {
         const error = await response.json();
         
-        // Check if location doesn't exist (cache update triggered)
-        if (error.updateTriggered !== undefined || error.cacheExists !== undefined) {
-            // Trigger cache update if endpoint provided
-            if (error.refreshEndpoint) {
-                fetch(error.refreshEndpoint, { method: 'POST' }).catch(() => {});
+        // Check error code to determine type
+        if (error.errorCode === 'CACHE_NOT_FOUND') {
+            // Location doesn't exist - trigger cache update if endpoint provided
+            if (error.suggestions?.refreshEndpoint) {
+                fetch(error.suggestions.refreshEndpoint, { method: 'POST' }).catch(() => {});
             }
-            throw new Error(`No cache found. ${error.message || 'Cache update triggered, please retry in a few moments.'}`);
+            throw new Error(error.message || 'Cache update triggered, please retry in a few moments.');
         }
         
         // Cache exists but no data in range
-        if (error.availableRange) {
-            const range = error.availableRange;
-            throw new Error(`${error.error} Available data: ${range.oldest} to ${range.newest}. ${error.suggestion || ''}`);
+        if (error.errorCode === 'TIME_RANGE_ERROR' && error.details?.availableRange) {
+            const range = error.details.availableRange;
+            const rangeMsg = range.oldest && range.newest 
+                ? ` Available data: ${new Date(range.oldest).toLocaleString()} to ${new Date(range.newest).toLocaleString()}.`
+                : '';
+            throw new Error(error.message + rangeMsg);
         }
         
-        throw new Error(error.error || 'No historical data found');
+        throw new Error(error.message || 'No historical data found');
     }
     
     if (!response.ok) {

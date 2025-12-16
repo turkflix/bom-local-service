@@ -195,5 +195,23 @@ public interface ICacheService
         int cacheExpirationMinutes,
         int cacheManagementCheckIntervalMinutes,
         CancellationToken cancellationToken = default);
+    
+    /// <summary>
+    /// Records progress update for a cache update operation using cacheFolderPath.
+    /// This is useful when locationKey is not directly available (e.g., in ScrapingService).
+    /// </summary>
+    /// <param name="cacheFolderPath">The cache folder path being updated</param>
+    /// <param name="phase">The current phase of the update</param>
+    /// <param name="currentFrame">The current frame being captured (if in CapturingFrames phase)</param>
+    /// <param name="totalFrames">The total number of frames to capture</param>
+    void RecordUpdateProgressByFolder(string cacheFolderPath, CacheUpdatePhase phase, int? currentFrame = null, int? totalFrames = null);
+    
+    /// <summary>
+    /// Gets the estimated remaining seconds for an in-progress cache update.
+    /// Returns 0 if not updating or no metrics available.
+    /// </summary>
+    /// <param name="locationKey">The location key (suburb_state)</param>
+    /// <returns>Estimated remaining seconds, or 0 if not updating or no metrics</returns>
+    int GetEstimatedRemainingSeconds(string locationKey);
 }
 

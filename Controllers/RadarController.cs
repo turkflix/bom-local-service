@@ -37,7 +37,7 @@ public class RadarController : ControllerBase
             var validationError = ValidationHelper.ValidateLocation(suburb, state);
             if (validationError != null)
             {
-                return BadRequest(new { error = validationError });
+                return BadRequest(ApiErrorResponseBuilder.ValidationError(validationError));
             }
 
             // Check if cache needs updating and trigger if needed (non-blocking)
@@ -70,17 +70,37 @@ public class RadarController : ControllerBase
                     cacheManagementCheckIntervalMinutes,
                     cancellationToken);
                 
-                return NotFound(new { 
-                    error = "Screenshots not found in cache. Cache update has been triggered in background. Please retry in a few moments.",
-                    retryAfter = 30, // seconds
-                    refreshEndpoint = $"/api/cache/{suburb}/{state}/refresh",
-                    updateTriggered = cacheStatus.UpdateTriggered,
-                    cacheExists = cacheStatus.CacheExists,
-                    cacheIsValid = cacheStatus.CacheIsValid,
-                    cacheExpiresAt = cacheStatus.CacheExpiresAt,
-                    nextUpdateTime = cacheStatus.NextUpdateTime,
-                    message = cacheStatus.Message
-                });
+                // Determine if update was triggered (check if it's already in progress or was just triggered)
+                var updateTriggered = cacheStatus.UpdateTriggered || 
+                                     (cacheStatus.Message?.Contains("in progress") ?? false) ||
+                                     (!cacheStatus.CacheExists && !cacheStatus.CacheIsValid);
+                
+                var errorResponse = ApiErrorResponseBuilder.CacheNotFound(suburb, state, cacheStatus, updateTriggered);
+                
+                // Enhance message based on cache status
+                if (cacheStatus.UpdateFailed)
+                {
+                    errorResponse.Message = $"No cached data found. Previous update attempt failed: {cacheStatus.Error ?? "Unknown error"}. Retrying...";
+                    errorResponse.Details!["previousUpdateFailed"] = true;
+                    if (cacheStatus.Error != null)
+                    {
+                        errorResponse.Details!["previousError"] = cacheStatus.Error;
+                    }
+                    if (cacheStatus.ErrorCode != null)
+                    {
+                        errorResponse.Details!["previousErrorCode"] = cacheStatus.ErrorCode;
+                    }
+                }
+                else if (cacheStatus.Message?.Contains("in progress") ?? false)
+                {
+                    errorResponse.Message = "No cached data found. Cache update is currently in progress. Please retry shortly.";
+                }
+                else if (!cacheStatus.CacheExists)
+                {
+                    errorResponse.Message = "No cached data found for this location (fresh start). Cache update has been triggered in background. Please retry in a few moments.";
+                }
+                
+                return NotFound(errorResponse);
             }
             
             // Generate URLs for frames if not already set
@@ -97,7 +117,11 @@ public class RadarController : ControllerBase
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error getting cached radar screenshots for suburb: {Suburb}, state: {State}", suburb, state);
-            return StatusCode(500, new { error = "An error occurred while getting the radar screenshots", message = ex.Message });
+            var errorResponse = ApiErrorResponseBuilder.InternalError(
+                "An error occurred while getting the radar screenshots", 
+                ex);
+            errorResponse.Details!["location"] = new { suburb, state };
+            return StatusCode(500, errorResponse);
         }
     }
 
@@ -112,7 +136,15 @@ public class RadarController : ControllerBase
             var validationError = ValidationHelper.ValidateLocation(suburb, state);
             if (validationError != null)
             {
-                return BadRequest(new { error = validationError });
+                return BadRequest(ApiErrorResponseBuilder.ValidationError(validationError));
+            }
+            
+            // Validate frame index
+            if (frameIndex < 0 || frameIndex > 6)
+            {
+                return BadRequest(ApiErrorResponseBuilder.ValidationError(
+                    $"Frame index must be between 0 and 6, got {frameIndex}", 
+                    "frameIndex"));
             }
             
             RadarFrame? frame;
@@ -130,7 +162,17 @@ public class RadarController : ControllerBase
             
             if (frame == null || !System.IO.File.Exists(frame.ImagePath))
             {
-                return NotFound(new { error = $"Frame {frameIndex} not found for {suburb}, {state}" });
+                var errorResponse = ApiErrorResponseBuilder.NotFound(
+                    "Frame", 
+                    $"Frame {frameIndex} for {suburb}, {state}",
+                    "The frame may not exist yet. Try refreshing the cache or checking if cache update is in progress.");
+                errorResponse.Details!["frameIndex"] = frameIndex;
+                errorResponse.Details!["location"] = new { suburb, state };
+                if (!string.IsNullOrEmpty(cacheFolder))
+                {
+                    errorResponse.Details["cacheFolder"] = cacheFolder;
+                }
+                return NotFound(errorResponse);
             }
             
             var imageBytes = await System.IO.File.ReadAllBytesAsync(frame.ImagePath, cancellationToken);
@@ -139,7 +181,12 @@ public class RadarController : ControllerBase
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error getting frame {FrameIndex} for suburb: {Suburb}, state: {State}", frameIndex, suburb, state);
-            return StatusCode(500, new { error = "An error occurred while getting the frame", message = ex.Message });
+            var errorResponse = ApiErrorResponseBuilder.InternalError(
+                "An error occurred while getting the frame", 
+                ex);
+            errorResponse.Details!["frameIndex"] = frameIndex;
+            errorResponse.Details!["location"] = new { suburb, state };
+            return StatusCode(500, errorResponse);
         }
     }
 
@@ -154,14 +201,24 @@ public class RadarController : ControllerBase
             var validationError = ValidationHelper.ValidateLocation(suburb, state);
             if (validationError != null)
             {
-                return BadRequest(new { error = validationError });
+                return BadRequest(ApiErrorResponseBuilder.ValidationError(validationError));
             }
 
             var result = await _bomRadarService.GetLastUpdatedInfoAsync(suburb, state, cancellationToken);
             
             if (result == null)
             {
-                return NotFound(new { error = "No cached data found. Use POST /api/cache/{suburb}/{state}/refresh to trigger cache update." });
+                var errorResponse = ApiErrorResponseBuilder.NotFound(
+                    "Metadata", 
+                    $"{suburb}, {state}",
+                    "Use POST /api/cache/{suburb}/{state}/refresh to trigger cache update.");
+                errorResponse.Details!["location"] = new { suburb, state };
+                errorResponse.Suggestions = new Dictionary<string, object>
+                {
+                    { "action", "refresh_cache" },
+                    { "refreshEndpoint", $"/api/cache/{Uri.EscapeDataString(suburb)}/{Uri.EscapeDataString(state)}/refresh" }
+                };
+                return NotFound(errorResponse);
             }
             
             return Ok(result);
@@ -169,7 +226,11 @@ public class RadarController : ControllerBase
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error getting metadata for suburb: {Suburb}, state: {State}", suburb, state);
-            return StatusCode(500, new { error = "An error occurred while getting metadata", message = ex.Message });
+            var errorResponse = ApiErrorResponseBuilder.InternalError(
+                "An error occurred while getting metadata", 
+                ex);
+            errorResponse.Details!["location"] = new { suburb, state };
+            return StatusCode(500, errorResponse);
         }
     }
 
@@ -190,7 +251,7 @@ public class RadarController : ControllerBase
             var validationError = ValidationHelper.ValidateLocation(suburb, state);
             if (validationError != null)
             {
-                return BadRequest(new { error = validationError });
+                return BadRequest(ApiErrorResponseBuilder.ValidationError(validationError));
             }
 
             DateTime? start = null;
@@ -200,7 +261,9 @@ public class RadarController : ControllerBase
             {
                 if (!DateTime.TryParse(startTime, null, System.Globalization.DateTimeStyles.RoundtripKind, out var parsedStart))
                 {
-                    return BadRequest(new { error = "Invalid startTime format. Use ISO 8601 format (e.g., 2025-12-07T00:00:00Z)" });
+                    return BadRequest(ApiErrorResponseBuilder.ValidationError(
+                        "Invalid startTime format. Use ISO 8601 format (e.g., 2025-12-07T00:00:00Z)", 
+                        "startTime"));
                 }
                 start = parsedStart.ToUniversalTime();
             }
@@ -209,14 +272,18 @@ public class RadarController : ControllerBase
             {
                 if (!DateTime.TryParse(endTime, null, System.Globalization.DateTimeStyles.RoundtripKind, out var parsedEnd))
                 {
-                    return BadRequest(new { error = "Invalid endTime format. Use ISO 8601 format (e.g., 2025-12-07T12:00:00Z)" });
+                    return BadRequest(ApiErrorResponseBuilder.ValidationError(
+                        "Invalid endTime format. Use ISO 8601 format (e.g., 2025-12-07T12:00:00Z)", 
+                        "endTime"));
                 }
                 end = parsedEnd.ToUniversalTime();
             }
             
             if (start.HasValue && end.HasValue && start.Value > end.Value)
             {
-                return BadRequest(new { error = "startTime must be before or equal to endTime" });
+                return BadRequest(ApiErrorResponseBuilder.ValidationError(
+                    "startTime must be before or equal to endTime",
+                    "timeRange"));
             }
 
             // Validate time range size to prevent excessive data loading
@@ -236,13 +303,10 @@ public class RadarController : ControllerBase
                         ? $"configured limit: {configuredMaxHours} hours"
                         : $"cache retention: {cacheRetentionHours} hours";
                     
-                    return BadRequest(new { 
-                        error = $"Time range exceeds maximum allowed duration of {maxTimeRangeHours} hours (based on {reason}). Please specify a smaller range.",
-                        requestedHours = timeRange.TotalHours,
-                        maxHours = maxTimeRangeHours,
-                        cacheRetentionHours = cacheRetentionHours,
-                        configuredMaxHours = configuredMaxHours
-                    });
+                    return BadRequest(ApiErrorResponseBuilder.TimeRangeError(
+                        $"Time range exceeds maximum allowed duration of {maxTimeRangeHours} hours (based on {reason}). Please specify a smaller range.",
+                        null,
+                        new { start = start.Value, end = end.Value, requestedHours = timeRange.TotalHours }));
                 }
             }
 
@@ -277,17 +341,15 @@ public class RadarController : ControllerBase
                     cacheManagementCheckIntervalMinutes,
                     cancellationToken);
                 
-                return NotFound(new { 
-                    error = "No cached data found for this location. Cache update has been triggered in background. Please retry in a few moments.",
-                    retryAfter = 30, // seconds
-                    refreshEndpoint = $"/api/cache/{suburb}/{state}/refresh",
-                    updateTriggered = cacheStatus.UpdateTriggered,
-                    cacheExists = cacheStatus.CacheExists,
-                    cacheIsValid = cacheStatus.CacheIsValid,
-                    cacheExpiresAt = cacheStatus.CacheExpiresAt,
-                    nextUpdateTime = cacheStatus.NextUpdateTime,
-                    message = cacheStatus.Message
-                });
+                var updateTriggered = cacheStatus.UpdateTriggered || 
+                                     (cacheStatus.Message?.Contains("in progress") ?? false) ||
+                                     (!cacheStatus.CacheExists && !cacheStatus.CacheIsValid);
+                
+                var errorResponse = ApiErrorResponseBuilder.CacheNotFound(suburb, state, cacheStatus, updateTriggered);
+                errorResponse.Message = "No cached data found for this location. Cache update has been triggered in background. Please retry in a few moments.";
+                errorResponse.Details!["requestedTimeRange"] = new { start, end };
+                
+                return NotFound(errorResponse);
             }
 
             // Location has cache, check if there's data in the requested time range
@@ -299,20 +361,22 @@ public class RadarController : ControllerBase
                 var oldestCache = cacheRange.OldestCache?.CacheTimestamp;
                 var newestCache = cacheRange.NewestCache?.CacheTimestamp;
                 
-                return NotFound(new { 
-                    error = "No historical data found for the specified time range.",
-                    availableRange = new {
-                        oldest = oldestCache,
-                        newest = newestCache,
-                        totalCacheFolders = cacheRange.TotalCacheFolders,
-                        timeSpanMinutes = cacheRange.TimeSpanMinutes
-                    },
-                    requestedRange = new {
-                        start = start,
-                        end = end
-                    },
-                    suggestion = "Try adjusting the time range to match the available cached data."
-                });
+                var availableRange = new {
+                    oldest = oldestCache,
+                    newest = newestCache,
+                    totalCacheFolders = cacheRange.TotalCacheFolders,
+                    timeSpanMinutes = cacheRange.TimeSpanMinutes
+                };
+                
+                var requestedRange = new {
+                    start = start,
+                    end = end
+                };
+                
+                return NotFound(ApiErrorResponseBuilder.TimeRangeError(
+                    "No historical data found for the specified time range.",
+                    availableRange,
+                    requestedRange));
             }
             
             return Ok(result);
@@ -320,7 +384,12 @@ public class RadarController : ControllerBase
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error getting radar time series for suburb: {Suburb}, state: {State}", suburb, state);
-            return StatusCode(500, new { error = "An error occurred while getting radar time series", message = ex.Message });
+            var errorResponse = ApiErrorResponseBuilder.InternalError(
+                "An error occurred while getting radar time series", 
+                ex);
+            errorResponse.Details!["location"] = new { suburb, state };
+            errorResponse.Details!["requestedTimeRange"] = new { startTime, endTime };
+            return StatusCode(500, errorResponse);
         }
     }
 }

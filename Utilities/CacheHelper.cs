@@ -61,5 +61,28 @@ public static class CacheHelper
     {
         return IsCacheFolderCompleteForDataType(cacheFolderPath, CachedDataType.Radar, configuration);
     }
+
+    /// <summary>
+    /// Calculates the estimated cache update duration in seconds.
+    /// This is used as a fallback when metrics-based estimation is not available yet.
+    /// Calculates based on frame count and configured wait times.
+    /// </summary>
+    public static int GetEstimatedUpdateDurationSeconds(IConfiguration configuration, CachedDataType dataType = CachedDataType.Radar)
+    {
+        // Calculate based on actual wait times and frame count
+        var frameCount = GetFrameCountForDataType(configuration, dataType);
+        var tileRenderWaitMs = configuration.GetValue<int>("Screenshot:TileRenderWaitMs", 5000);
+        var dynamicContentWaitMs = configuration.GetValue<int>("Screenshot:DynamicContentWaitMs", 2000);
+        
+        // Rough calculation:
+        // - Initial page load and navigation: ~10-15 seconds
+        // - Per frame: tileRenderWaitMs (default 5s) + overhead (~1-2s for clicking, waiting, etc.)
+        // - Final processing and metadata saving: ~5 seconds
+        var perFrameSeconds = (tileRenderWaitMs + 1500) / 1000.0; // Add 1.5s overhead per frame
+        var baseOverheadSeconds = 15; // Initial load + final processing
+        var estimatedSeconds = (int)Math.Ceiling(baseOverheadSeconds + (frameCount * perFrameSeconds));
+        
+        return estimatedSeconds;
+    }
 }
 

@@ -35,14 +35,21 @@ public class CacheController : ControllerBase
             var validationError = ValidationHelper.ValidateLocation(suburb, state);
             if (validationError != null)
             {
-                return BadRequest(new { error = validationError });
+                return BadRequest(ApiErrorResponseBuilder.ValidationError(validationError));
             }
 
             var result = await _bomRadarService.GetCacheRangeAsync(suburb, state, cancellationToken);
             
             if (result.TotalCacheFolders == 0)
             {
-                return NotFound(new { error = "No cached data found for this location." });
+                var errorResponse = ApiErrorResponseBuilder.CacheNotFound(suburb, state);
+                errorResponse.Message = "No cached data found for this location.";
+                errorResponse.Suggestions = new Dictionary<string, object>
+                {
+                    { "action", "refresh_cache" },
+                    { "refreshEndpoint", $"/api/cache/{Uri.EscapeDataString(suburb)}/{Uri.EscapeDataString(state)}/refresh" }
+                };
+                return NotFound(errorResponse);
             }
             
             return Ok(result);
@@ -50,7 +57,11 @@ public class CacheController : ControllerBase
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error getting cache range for suburb: {Suburb}, state: {State}", suburb, state);
-            return StatusCode(500, new { error = "An error occurred while getting cache range", message = ex.Message });
+            var errorResponse = ApiErrorResponseBuilder.InternalError(
+                "An error occurred while getting cache range", 
+                ex);
+            errorResponse.Details!["location"] = new { suburb, state };
+            return StatusCode(500, errorResponse);
         }
     }
 
@@ -65,7 +76,7 @@ public class CacheController : ControllerBase
             var validationError = ValidationHelper.ValidateLocation(suburb, state);
             if (validationError != null)
             {
-                return BadRequest(new { error = validationError });
+                return BadRequest(ApiErrorResponseBuilder.ValidationError(validationError));
             }
 
             var status = await _bomRadarService.TriggerCacheUpdateAsync(suburb, state, cancellationToken);
@@ -74,7 +85,12 @@ public class CacheController : ControllerBase
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error triggering cache update for suburb: {Suburb}, state: {State}", suburb, state);
-            return StatusCode(500, new { error = "An error occurred while triggering cache update", message = ex.Message });
+            var errorResponse = ApiErrorResponseBuilder.CacheUpdateFailed(
+                suburb, 
+                state, 
+                "Failed to trigger cache update", 
+                ex);
+            return StatusCode(500, errorResponse);
         }
     }
 
@@ -89,7 +105,7 @@ public class CacheController : ControllerBase
             var validationError = ValidationHelper.ValidateLocation(suburb, state);
             if (validationError != null)
             {
-                return BadRequest(new { error = validationError });
+                return BadRequest(ApiErrorResponseBuilder.ValidationError(validationError));
             }
 
             var deleted = await _bomRadarService.DeleteCachedLocationAsync(suburb, state, cancellationToken);
@@ -100,13 +116,22 @@ public class CacheController : ControllerBase
             }
             else
             {
-                return NotFound(new { error = $"No cached data found for {suburb}, {state}" });
+                var errorResponse = ApiErrorResponseBuilder.NotFound(
+                    "Cache", 
+                    $"{suburb}, {state}",
+                    "No cached data exists for this location.");
+                errorResponse.Details!["location"] = new { suburb, state };
+                return NotFound(errorResponse);
             }
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error deleting cached location for suburb: {Suburb}, state: {State}", suburb, state);
-            return StatusCode(500, new { error = "An error occurred while deleting cached location", message = ex.Message });
+            var errorResponse = ApiErrorResponseBuilder.InternalError(
+                "An error occurred while deleting cached location", 
+                ex);
+            errorResponse.Details!["location"] = new { suburb, state };
+            return StatusCode(500, errorResponse);
         }
     }
 }

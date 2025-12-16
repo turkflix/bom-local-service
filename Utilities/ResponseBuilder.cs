@@ -34,16 +34,18 @@ public static class ResponseBuilder
     /// Creates a RadarResponse from a cache folder path, frames, and metadata
     /// </summary>
     /// <param name="cacheManagementCheckIntervalMinutes">The interval in minutes that the background cache management service checks for updates. Used to calculate NextUpdateTime when cache is invalid.</param>
+    /// <param name="estimatedUpdateDurationSeconds">Estimated duration in seconds for a cache update to complete. Used to calculate NextUpdateTime when update is in progress.</param>
     public static RadarResponse CreateRadarResponse(
         string cacheFolderPath, 
         List<RadarFrame> frames,
+        int cacheManagementCheckIntervalMinutes,
         LastUpdatedInfo? metadata = null,
         string? suburb = null,
         string? state = null,
         bool? cacheIsValid = null,
         DateTime? cacheExpiresAt = null,
         bool isUpdating = false,
-        int cacheManagementCheckIntervalMinutes = 5)
+        int? estimatedUpdateDurationSeconds = null)
     {
         var folderInfo = new DirectoryInfo(cacheFolderPath);
         var lastWriteTime = folderInfo.Exists 
@@ -88,8 +90,9 @@ public static class ResponseBuilder
         
         if (isUpdating)
         {
-            // Update in progress - estimate completion in ~2 minutes
-            nextUpdateTime = now.AddMinutes(2);
+            // Update in progress - estimate completion based on configured/calculated duration
+            var durationSeconds = estimatedUpdateDurationSeconds ?? 120; // Default to 2 minutes if not provided
+            nextUpdateTime = now.AddSeconds(durationSeconds);
         }
         else if (cacheIsValid == true && cacheExpiresAt.HasValue)
         {

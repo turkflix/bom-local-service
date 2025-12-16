@@ -13,6 +13,13 @@ public class CacheService : ICacheService
     private readonly double _cacheExpirationMinutes;
     private readonly IConfiguration _configuration;
     private readonly ConcurrentDictionary<string, string> _activeCacheFolders = new(); // locationKey -> cacheFolderPath
+    
+    // Progress tracking for cache updates
+    private readonly ConcurrentDictionary<string, (DateTime startTime, CacheUpdatePhase phase, int? currentFrame, int? totalFrames)> _updateProgress = new();
+    private readonly ConcurrentQueue<double> _recentTotalDurations = new(); // Overall durations in seconds
+    private readonly ConcurrentDictionary<CacheUpdatePhase, ConcurrentQueue<double>> _phaseDurations = new(); // Phase -> durations
+    private readonly object _metricsLock = new();
+    private const int MaxSamples = 20;
 
     public CacheService(ILogger<CacheService> logger, IConfiguration configuration)
     {
@@ -519,6 +526,7 @@ public class CacheService : ICacheService
     public void SetActiveCacheFolder(string locationKey, string cacheFolderPath)
     {
         _activeCacheFolders[locationKey] = cacheFolderPath;
+        _updateProgress[locationKey] = (DateTime.UtcNow, CacheUpdatePhase.Initializing, null, null);
         _logger.LogDebug("Tracking active cache folder: {Folder} for location: {Location}", cacheFolderPath, locationKey);
     }
     
@@ -526,7 +534,203 @@ public class CacheService : ICacheService
     {
         if (_activeCacheFolders.TryRemove(locationKey, out var folder))
         {
+            RecordUpdateComplete(locationKey);
+            _updateProgress.TryRemove(locationKey, out _);
             _logger.LogDebug("Cleared active cache folder tracking: {Folder} for location: {Location}", folder, locationKey);
+        }
+    }
+    
+    /// <summary>
+    /// Records progress update for a cache update operation.
+    /// </summary>
+    public void RecordUpdateProgress(string locationKey, CacheUpdatePhase phase, int? currentFrame = null, int? totalFrames = null)
+    {
+        if (_updateProgress.TryGetValue(locationKey, out var existing))
+        {
+            // Record duration for previous phase if it changed
+            var previousPhase = existing.phase;
+            if (previousPhase != phase)
+            {
+                var phaseDuration = (DateTime.UtcNow - existing.startTime).TotalSeconds;
+                
+                lock (_metricsLock)
+                {
+                    var durations = _phaseDurations.GetOrAdd(previousPhase, _ => new ConcurrentQueue<double>());
+                    durations.Enqueue(phaseDuration);
+                    
+                    while (durations.Count > MaxSamples)
+                    {
+                        durations.TryDequeue(out _);
+                    }
+                }
+            }
+        }
+        
+        // Update progress
+        var startTime = _updateProgress.TryGetValue(locationKey, out var current) ? current.startTime : DateTime.UtcNow;
+        _updateProgress[locationKey] = (startTime, phase, currentFrame, totalFrames);
+    }
+    
+    /// <summary>
+    /// Records completion of a cache update and stores metrics.
+    /// </summary>
+    private void RecordUpdateComplete(string locationKey)
+    {
+        if (_updateProgress.TryRemove(locationKey, out var progress))
+        {
+            var totalDuration = (DateTime.UtcNow - progress.startTime).TotalSeconds;
+            
+            lock (_metricsLock)
+            {
+                _recentTotalDurations.Enqueue(totalDuration);
+                while (_recentTotalDurations.Count > MaxSamples)
+                {
+                    _recentTotalDurations.TryDequeue(out _);
+                }
+            }
+            
+            _logger.LogDebug("Cache update completed in {Duration:F1} seconds for {Location}", totalDuration, locationKey);
+        }
+    }
+    
+    /// <summary>
+    /// Gets the estimated remaining seconds for an in-progress cache update.
+    /// Returns 0 if not updating or no metrics available.
+    /// </summary>
+    public int GetEstimatedRemainingSeconds(string locationKey)
+    {
+        if (!_updateProgress.TryGetValue(locationKey, out var progress))
+        {
+            return 0; // Not updating
+        }
+        
+        var elapsed = (DateTime.UtcNow - progress.startTime).TotalSeconds;
+        
+        // If we have historical data, use it
+        var avgTotal = GetAverageTotalDuration();
+        if (avgTotal > 0)
+        {
+            // Estimate based on phase and progress
+            double estimatedRemaining = 0;
+            
+            switch (progress.phase)
+            {
+                case CacheUpdatePhase.Initializing:
+                    // Estimate: avg total - elapsed (with some buffer)
+                    estimatedRemaining = Math.Max(0, avgTotal * 1.1 - elapsed);
+                    break;
+                    
+                case CacheUpdatePhase.CapturingFrames:
+                    if (progress.currentFrame.HasValue && progress.totalFrames.HasValue)
+                    {
+                        // We know exactly where we are: frame X of Y
+                        var framesRemaining = progress.totalFrames.Value - progress.currentFrame.Value - 1;
+                        var avgFrameDuration = GetAverageFrameDuration();
+                        if (avgFrameDuration > 0)
+                        {
+                            // Time for remaining frames + saving phase
+                            estimatedRemaining = (framesRemaining * avgFrameDuration) + GetAveragePhaseDuration(CacheUpdatePhase.Saving);
+                        }
+                        else
+                        {
+                            // Fallback: estimate based on progress through total
+                            var progressFraction = (progress.currentFrame.Value + 1.0) / progress.totalFrames.Value;
+                            estimatedRemaining = Math.Max(0, (avgTotal / progressFraction) - elapsed);
+                        }
+                    }
+                    else
+                    {
+                        // No frame info - estimate based on elapsed time
+                        estimatedRemaining = Math.Max(0, avgTotal - elapsed);
+                    }
+                    break;
+                    
+                case CacheUpdatePhase.Saving:
+                    // Almost done - just saving phase remaining
+                    estimatedRemaining = GetAveragePhaseDuration(CacheUpdatePhase.Saving);
+                    if (estimatedRemaining == 0)
+                    {
+                        estimatedRemaining = 5; // Default 5 seconds for saving
+                    }
+                    break;
+            }
+            
+            return (int)Math.Ceiling(Math.Max(0, estimatedRemaining));
+        }
+        
+        // No historical data - return 0 to signal fallback
+        return 0;
+    }
+    
+    /// <summary>
+    /// Gets the average total duration of cache updates from recent metrics.
+    /// </summary>
+    private double GetAverageTotalDuration()
+    {
+        lock (_metricsLock)
+        {
+            if (_recentTotalDurations.Count == 0) return 0;
+            var durations = _recentTotalDurations.ToArray();
+            Array.Sort(durations);
+            // Use median for robustness
+            var median = durations.Length % 2 == 0
+                ? (durations[durations.Length / 2 - 1] + durations[durations.Length / 2]) / 2.0
+                : durations[durations.Length / 2];
+            return median;
+        }
+    }
+    
+    /// <summary>
+    /// Gets the average duration per frame based on historical CapturingFrames phase data.
+    /// </summary>
+    private double GetAverageFrameDuration()
+    {
+        // Estimate frame duration from CapturingFrames phase duration / frame count
+        var avgCapturingDuration = GetAveragePhaseDuration(CacheUpdatePhase.CapturingFrames);
+        var frameCount = CacheHelper.GetFrameCountForDataType(_configuration, CachedDataType.Radar);
+        return avgCapturingDuration > 0 && frameCount > 0 ? avgCapturingDuration / frameCount : 0;
+    }
+    
+    /// <summary>
+    /// Gets the average duration for a specific phase from historical data.
+    /// </summary>
+    private double GetAveragePhaseDuration(CacheUpdatePhase phase)
+    {
+        lock (_metricsLock)
+        {
+            if (!_phaseDurations.TryGetValue(phase, out var durations) || durations.Count == 0)
+            {
+                return 0;
+            }
+            var durationsArray = durations.ToArray();
+            return durationsArray.Average();
+        }
+    }
+    
+    /// <summary>
+    /// Gets the locationKey from a cacheFolderPath by parsing the folder name.
+    /// </summary>
+    private string? GetLocationKeyFromCacheFolder(string cacheFolderPath)
+    {
+        var folderName = Path.GetFileName(cacheFolderPath);
+        var location = LocationHelper.ParseLocationFromFilename(folderName);
+        if (location.HasValue)
+        {
+            return LocationHelper.GetLocationKey(location.Value.suburb, location.Value.state);
+        }
+        return null;
+    }
+    
+    /// <summary>
+    /// Records progress update for a cache update operation using cacheFolderPath.
+    /// This is useful when locationKey is not directly available (e.g., in ScrapingService).
+    /// </summary>
+    public void RecordUpdateProgressByFolder(string cacheFolderPath, CacheUpdatePhase phase, int? currentFrame = null, int? totalFrames = null)
+    {
+        var locationKey = GetLocationKeyFromCacheFolder(cacheFolderPath);
+        if (locationKey != null)
+        {
+            RecordUpdateProgress(locationKey, phase, currentFrame, totalFrames);
         }
     }
     
@@ -627,8 +831,18 @@ public class CacheService : ICacheService
         if (isUpdating)
         {
             status.Message = "Cache update already in progress";
-            // Update in progress - estimate completion in ~2 minutes
-            status.NextUpdateTime = DateTime.UtcNow.AddMinutes(2);
+            // Try metrics-based estimate first
+            var remainingSeconds = GetEstimatedRemainingSeconds(locationKey);
+            if (remainingSeconds > 0)
+            {
+                status.NextUpdateTime = DateTime.UtcNow.AddSeconds(remainingSeconds);
+            }
+            else
+            {
+                // Fallback to calculated estimate
+                var estimatedDurationSeconds = CacheHelper.GetEstimatedUpdateDurationSeconds(_configuration, dataType);
+                status.NextUpdateTime = DateTime.UtcNow.AddSeconds(estimatedDurationSeconds);
+            }
         }
         else if (status.CacheIsValid && status.CacheExpiresAt.HasValue)
         {

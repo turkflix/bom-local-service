@@ -1,6 +1,16 @@
 namespace BomLocalService.Models;
 
 /// <summary>
+/// Represents the current phase of a cache update operation.
+/// </summary>
+public enum CacheUpdatePhase
+{
+    Initializing,      // Browser setup, navigation (0-20% of time)
+    CapturingFrames,   // Frame capture loop (20-95% of time) 
+    Saving            // Metadata, cleanup (95-100% of time)
+}
+
+/// <summary>
 /// Status information about a cache update operation for a location.
 /// Returned when manually triggering a cache refresh via the refresh endpoint.
 /// </summary>
@@ -51,7 +61,34 @@ public class CacheUpdateStatus
     /// - "Cache is stale, update triggered" - Cache exists but expired, update initiated
     /// - "No cache exists, update triggered" - No cache found, update initiated
     /// - "Cache update already in progress" - An update is currently running
+    /// - "Cache update failed" - An update was attempted but failed (check Error property)
     /// </summary>
     public string? Message { get; set; }
+
+    /// <summary>
+    /// Indicates whether the last cache update attempt failed.
+    /// True if an update was triggered but encountered an error.
+    /// </summary>
+    public bool UpdateFailed { get; set; }
+
+    /// <summary>
+    /// Error information if the cache update failed.
+    /// Contains error code, message, and details about what went wrong.
+    /// Null if no error occurred or if update hasn't been attempted yet.
+    /// </summary>
+    public string? Error { get; set; }
+
+    /// <summary>
+    /// Error code for programmatic handling of update failures.
+    /// Examples: "SCRAPING_ERROR", "BROWSER_ERROR", "STORAGE_ERROR", "TIMEOUT_ERROR"
+    /// Null if no error occurred.
+    /// </summary>
+    public string? ErrorCode { get; set; }
+
+    /// <summary>
+    /// Timestamp when the last update attempt was made (UTC).
+    /// Null if no update has been attempted yet.
+    /// </summary>
+    public DateTime? LastUpdateAttempt { get; set; }
 }
 

@@ -16,6 +16,7 @@ public class BomRadarService : IBomRadarService, IDisposable
     private readonly double _cacheExpirationMinutes;
     private readonly int _cacheManagementCheckIntervalMinutes;
     private readonly int _timeSeriesWarningFolderCount;
+    private readonly int _estimatedUpdateDurationSeconds;
 
     public BomRadarService(
         ILogger<BomRadarService> logger,
@@ -35,6 +36,10 @@ public class BomRadarService : IBomRadarService, IDisposable
         _cacheManagementCheckIntervalMinutes = configuration.GetValue<int>("CacheManagement:CheckIntervalMinutes", 5);
         _timeSeriesWarningFolderCount = configuration.GetValue<int>("TimeSeries:WarningFolderCount", 200);
         
+        // Calculate estimated cache update duration
+        _estimatedUpdateDurationSeconds = CacheHelper.GetEstimatedUpdateDurationSeconds(configuration, CachedDataType.Radar);
+        _logger.LogInformation("Estimated cache update duration: {Seconds} seconds", _estimatedUpdateDurationSeconds);
+        
         if (_cacheExpirationMinutes <= 0)
         {
             throw new ArgumentException("CacheExpirationMinutes must be greater than 0", nameof(configuration));
@@ -46,6 +51,10 @@ public class BomRadarService : IBomRadarService, IDisposable
         if (_timeSeriesWarningFolderCount <= 0)
         {
             throw new ArgumentException("TimeSeries:WarningFolderCount must be greater than 0", nameof(configuration));
+        }
+        if (_estimatedUpdateDurationSeconds <= 0)
+        {
+            throw new ArgumentException("Calculated estimated update duration must be greater than 0. Check Screenshot:TileRenderWaitMs, Screenshot:DynamicContentWaitMs, and CachedDataTypes:Radar:FrameCount configuration values.", nameof(configuration));
         }
     }
 
@@ -71,7 +80,11 @@ public class BomRadarService : IBomRadarService, IDisposable
         var cacheExpiresAt = cachedMetadata != null ? cachedMetadata.ObservationTime.AddMinutes(_cacheExpirationMinutes) : (DateTime?)null;
         var isUpdating = _cacheService.IsLocationUpdating(locationKey);
         
-        return ResponseBuilder.CreateRadarResponse(cacheFolderPath, frames, cachedMetadata, suburb, state, isValid, cacheExpiresAt, isUpdating, _cacheManagementCheckIntervalMinutes);
+        // Use metrics-based estimate if available, otherwise fallback
+        var estimatedDuration = _cacheService.GetEstimatedRemainingSeconds(locationKey);
+        var durationToUse = estimatedDuration > 0 ? estimatedDuration : _estimatedUpdateDurationSeconds;
+        
+        return ResponseBuilder.CreateRadarResponse(cacheFolderPath, frames, _cacheManagementCheckIntervalMinutes, cachedMetadata, suburb, state, isValid, cacheExpiresAt, isUpdating, durationToUse);
     }
     
     public async Task<List<RadarFrame>?> GetCachedFramesAsync(string suburb, string state, CancellationToken cancellationToken = default)
@@ -119,7 +132,19 @@ public class BomRadarService : IBomRadarService, IDisposable
             
             status.UpdateTriggered = false;
             status.Message = "Cache update already in progress";
-            status.NextUpdateTime = status.CacheExpiresAt ?? DateTime.UtcNow.AddMinutes(_cacheExpirationMinutes);
+            
+            // Use metrics-based estimate if available, otherwise fallback
+            var remainingSeconds = _cacheService.GetEstimatedRemainingSeconds(locationKey);
+            if (remainingSeconds > 0)
+            {
+                status.NextUpdateTime = DateTime.UtcNow.AddSeconds(remainingSeconds);
+            }
+            else
+            {
+                // Fallback to calculated estimate
+                status.NextUpdateTime = DateTime.UtcNow.AddSeconds(_estimatedUpdateDurationSeconds);
+            }
+            
             return status;
         }
         
@@ -159,14 +184,16 @@ public class BomRadarService : IBomRadarService, IDisposable
                 ? "Cache is stale, update triggered" 
                 : "No cache exists, update triggered";
             
-            // Calculate next update time
-            if (status.CacheExpiresAt.HasValue && status.CacheExpiresAt.Value > DateTime.UtcNow)
+            // Try metrics-based estimate first, then fallback to calculated
+            var remainingSeconds = _cacheService.GetEstimatedRemainingSeconds(locationKey);
+            if (remainingSeconds > 0)
             {
-                status.NextUpdateTime = status.CacheExpiresAt.Value;
+                status.NextUpdateTime = DateTime.UtcNow.AddSeconds(remainingSeconds);
             }
             else
             {
-                status.NextUpdateTime = DateTime.UtcNow.AddMinutes(_cacheExpirationMinutes);
+                // Fallback to calculated estimate
+                status.NextUpdateTime = DateTime.UtcNow.AddSeconds(_estimatedUpdateDurationSeconds);
             }
         }
         else
@@ -198,7 +225,12 @@ public class BomRadarService : IBomRadarService, IDisposable
                 var frames = await _cacheService.GetCachedFramesAsync(suburb, state, cancellationToken);
                 var isValid = cachedMetadata != null && _cacheService.IsCacheValid(cachedMetadata);
                 var cacheExpiresAt = cachedMetadata != null ? cachedMetadata.ObservationTime.AddMinutes(_cacheExpirationMinutes) : (DateTime?)null;
-                return ResponseBuilder.CreateRadarResponse(cacheFolderPath, frames, cachedMetadata, suburb, state, isValid, cacheExpiresAt, isUpdating: true, _cacheManagementCheckIntervalMinutes);
+                
+                // Use metrics-based estimate if available, otherwise fallback
+                var estimatedDuration = _cacheService.GetEstimatedRemainingSeconds(locationKey);
+                var durationToUse = estimatedDuration > 0 ? estimatedDuration : _estimatedUpdateDurationSeconds;
+                
+                return ResponseBuilder.CreateRadarResponse(cacheFolderPath, frames, _cacheManagementCheckIntervalMinutes, cachedMetadata, suburb, state, isValid, cacheExpiresAt, isUpdating: true, durationToUse);
             }
             else
             {
@@ -215,7 +247,7 @@ public class BomRadarService : IBomRadarService, IDisposable
                 _logger.LogInformation("Returning valid cached screenshots for {Suburb}, {State} (no semaphore needed)", suburb, state);
                 var frames = await _cacheService.GetCachedFramesAsync(suburb, state, cancellationToken);
                 var cacheExpiresAt = cachedMetadata.ObservationTime.AddMinutes(_cacheExpirationMinutes);
-                return ResponseBuilder.CreateRadarResponse(cacheFolderPath, frames, cachedMetadata, suburb, state, isValid, cacheExpiresAt, isUpdating: false, _cacheManagementCheckIntervalMinutes);
+                return ResponseBuilder.CreateRadarResponse(cacheFolderPath, frames, _cacheManagementCheckIntervalMinutes, cachedMetadata, suburb, state, isValid, cacheExpiresAt, isUpdating: false, _estimatedUpdateDurationSeconds);
             }
             else
             {
@@ -265,7 +297,7 @@ public class BomRadarService : IBomRadarService, IDisposable
                 _logger.LogInformation("Cache became valid while waiting for semaphore, returning cached screenshots");
                 var recheckFrames = await _cacheService.GetCachedFramesAsync(suburb, state, cancellationToken);
                 var recheckCacheExpiresAt = recheckCachedMetadata.ObservationTime.AddMinutes(_cacheExpirationMinutes);
-                return ResponseBuilder.CreateRadarResponse(recheckCacheFolderPath, recheckFrames, recheckCachedMetadata, suburb, state, cacheIsValid: true, recheckCacheExpiresAt, isUpdating: false, _cacheManagementCheckIntervalMinutes);
+                return ResponseBuilder.CreateRadarResponse(recheckCacheFolderPath, recheckFrames, _cacheManagementCheckIntervalMinutes, recheckCachedMetadata, suburb, state, cacheIsValid: true, recheckCacheExpiresAt, isUpdating: false);
             }
             
             // Create debug folder only now
