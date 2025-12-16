@@ -219,11 +219,100 @@ public class RadarController : ControllerBase
                 return BadRequest(new { error = "startTime must be before or equal to endTime" });
             }
 
+            // Validate time range size to prevent excessive data loading
+            // Default: base limit on cache retention, but allow override via config
+            var cacheRetentionHours = _configuration.GetValue<int>("CacheRetentionHours", 24);
+            var configuredMaxHours = _configuration.GetValue<int?>("TimeSeries:MaxTimeRangeHours");
+            
+            // Use configured value if set, otherwise use cache retention (with minimum of 24 hours)
+            var maxTimeRangeHours = configuredMaxHours ?? Math.Max(cacheRetentionHours, 24);
+            
+            if (start.HasValue && end.HasValue)
+            {
+                var timeRange = end.Value - start.Value;
+                if (timeRange.TotalHours > maxTimeRangeHours)
+                {
+                    var reason = configuredMaxHours.HasValue 
+                        ? $"configured limit: {configuredMaxHours} hours"
+                        : $"cache retention: {cacheRetentionHours} hours";
+                    
+                    return BadRequest(new { 
+                        error = $"Time range exceeds maximum allowed duration of {maxTimeRangeHours} hours (based on {reason}). Please specify a smaller range.",
+                        requestedHours = timeRange.TotalHours,
+                        maxHours = maxTimeRangeHours,
+                        cacheRetentionHours = cacheRetentionHours,
+                        configuredMaxHours = configuredMaxHours
+                    });
+                }
+            }
+
+            // Check if location has any cache at all (to distinguish from "no data in range")
+            var cacheRange = await _bomRadarService.GetCacheRangeAsync(suburb, state, cancellationToken);
+            var locationHasCache = cacheRange.TotalCacheFolders > 0;
+
+            // If no cache exists for this location, trigger background update and return detailed 404
+            if (!locationHasCache)
+            {
+                // Trigger background cache update (non-blocking)
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await _bomRadarService.TriggerCacheUpdateAsync(suburb, state, CancellationToken.None);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Background cache update failed for {Suburb}, {State}", suburb, state);
+                    }
+                });
+
+                // Get cache status to include in 404 response
+                var cacheExpirationMinutes = (int)_configuration.GetValue<double>("CacheExpirationMinutes", 15.5);
+                var cacheManagementCheckIntervalMinutes = _configuration.GetValue<int>("CacheManagement:CheckIntervalMinutes", 5);
+                var cacheStatus = await _cacheService.GetCacheStatusAsync(
+                    suburb, 
+                    state, 
+                    CachedDataType.Radar,
+                    cacheExpirationMinutes,
+                    cacheManagementCheckIntervalMinutes,
+                    cancellationToken);
+                
+                return NotFound(new { 
+                    error = "No cached data found for this location. Cache update has been triggered in background. Please retry in a few moments.",
+                    retryAfter = 30, // seconds
+                    refreshEndpoint = $"/api/cache/{suburb}/{state}/refresh",
+                    updateTriggered = cacheStatus.UpdateTriggered,
+                    cacheExists = cacheStatus.CacheExists,
+                    cacheIsValid = cacheStatus.CacheIsValid,
+                    cacheExpiresAt = cacheStatus.CacheExpiresAt,
+                    nextUpdateTime = cacheStatus.NextUpdateTime,
+                    message = cacheStatus.Message
+                });
+            }
+
+            // Location has cache, check if there's data in the requested time range
             var result = await _bomRadarService.GetRadarTimeSeriesAsync(suburb, state, start, end, cancellationToken);
             
             if (result.CacheFolders.Count == 0)
             {
-                return NotFound(new { error = "No historical data found for the specified time range." });
+                // Location has cache, but no data in the requested time range
+                var oldestCache = cacheRange.OldestCache?.CacheTimestamp;
+                var newestCache = cacheRange.NewestCache?.CacheTimestamp;
+                
+                return NotFound(new { 
+                    error = "No historical data found for the specified time range.",
+                    availableRange = new {
+                        oldest = oldestCache,
+                        newest = newestCache,
+                        totalCacheFolders = cacheRange.TotalCacheFolders,
+                        timeSpanMinutes = cacheRange.TimeSpanMinutes
+                    },
+                    requestedRange = new {
+                        start = start,
+                        end = end
+                    },
+                    suggestion = "Try adjusting the time range to match the available cached data."
+                });
             }
             
             return Ok(result);

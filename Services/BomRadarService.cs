@@ -15,6 +15,7 @@ public class BomRadarService : IBomRadarService, IDisposable
     private readonly IConfiguration _configuration;
     private readonly double _cacheExpirationMinutes;
     private readonly int _cacheManagementCheckIntervalMinutes;
+    private readonly int _timeSeriesWarningFolderCount;
 
     public BomRadarService(
         ILogger<BomRadarService> logger,
@@ -32,6 +33,7 @@ public class BomRadarService : IBomRadarService, IDisposable
         _configuration = configuration;
         _cacheExpirationMinutes = configuration.GetValue<double>("CacheExpirationMinutes", 12.5);
         _cacheManagementCheckIntervalMinutes = configuration.GetValue<int>("CacheManagement:CheckIntervalMinutes", 5);
+        _timeSeriesWarningFolderCount = configuration.GetValue<int>("TimeSeries:WarningFolderCount", 200);
         
         if (_cacheExpirationMinutes <= 0)
         {
@@ -40,6 +42,10 @@ public class BomRadarService : IBomRadarService, IDisposable
         if (_cacheManagementCheckIntervalMinutes <= 0 || _cacheManagementCheckIntervalMinutes > 60)
         {
             throw new ArgumentException("CacheManagement:CheckIntervalMinutes must be between 1 and 60", nameof(configuration));
+        }
+        if (_timeSeriesWarningFolderCount <= 0)
+        {
+            throw new ArgumentException("TimeSeries:WarningFolderCount must be greater than 0", nameof(configuration));
         }
     }
 
@@ -429,6 +435,16 @@ public class BomRadarService : IBomRadarService, IDisposable
             filteredFolders = filteredFolders.Where(f => f.CacheTimestamp <= endTime.Value);
         }
         
+        var filteredFoldersList = filteredFolders.ToList();
+        
+        // Warn if processing a large number of folders (configurable threshold)
+        if (filteredFoldersList.Count > _timeSeriesWarningFolderCount)
+        {
+            _logger.LogWarning(
+                "Processing large number of cache folders ({Count}) for time series request. Suburb: {Suburb}, State: {State}, StartTime: {StartTime}, EndTime: {EndTime}",
+                filteredFoldersList.Count, suburb, state, startTime, endTime);
+        }
+        
         var result = new List<RadarCacheFolderFrames>();
         var encodedSuburb = Uri.EscapeDataString(suburb);
         var encodedState = Uri.EscapeDataString(state);
@@ -437,7 +453,7 @@ public class BomRadarService : IBomRadarService, IDisposable
         // Use a HashSet to track unique absolute observation times we've already seen
         var seenAbsoluteTimes = new HashSet<DateTime>();
         
-        foreach (var folderInfo in filteredFolders.OrderByDescending(f => f.CacheTimestamp))
+        foreach (var folderInfo in filteredFoldersList.OrderByDescending(f => f.CacheTimestamp))
         {
             // Load frames from this folder's radar subfolder
             var cachedFrames = await _cacheService.GetFramesFromCacheFolderAsync(

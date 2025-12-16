@@ -198,7 +198,7 @@ All configuration can be done via environment variables, which override the defa
 | Variable | Description | Default | Example |
 |----------|-------------|---------|---------|
 | `CACHEDIRECTORY` | Directory path for cache storage | `/app/cache` | `/data/bom-cache` |
-| `CACHERETENTIONHOURS` | Hours to retain cached data before cleanup | `24` | `48` |
+| `CACHERETENTIONHOURS` | Hours to retain cached data before cleanup (can be any positive integer) | `24` | `48`, `72`, `168` (1 week) |
 | `CACHEEXPIRATIONMINUTES` | Minutes before cache is considered expired | `12.5` | `15` |
 | `TIMEZONE` | Timezone for time parsing (IANA format) | `Australia/Brisbane` | `Australia/Sydney` |
 
@@ -230,6 +230,13 @@ All configuration can be done via environment variables, which override the defa
 |----------|-------------|---------|---------|
 | `DEBUG__ENABLED` | Enable debug mode (saves debug screenshots) | `false` | `true` |
 | `DEBUG__WAITMS` | Additional wait time in debug mode | `2000` | `5000` |
+
+#### Time Series Configuration
+
+| Variable | Description | Default | Example |
+|----------|-------------|---------|---------|
+| `TIMESERIES__WARNINGFOLDERCOUNT` | Number of cache folders that triggers a warning log when processing time series requests | `200` | `300` |
+| `TIMESERIES__MAXTIMERANGEHOURS` | Maximum time range allowed for time series queries (null = use CacheRetentionHours) | `null` (uses CacheRetentionHours) | `72` |
 
 #### Docker Compose Port Configuration
 
@@ -399,7 +406,7 @@ GET /api/radar/{suburb}/{state}/timeseries?startTime={iso8601}&endTime={iso8601}
 - `startTime` (query, optional): ISO 8601 start time (e.g., `2025-01-15T00:00:00Z`)
 - `endTime` (query, optional): ISO 8601 end time (defaults to now)
 
-**Response:**
+**Response (200 OK):**
 ```json
 {
   "cacheFolders": [
@@ -417,10 +424,54 @@ GET /api/radar/{suburb}/{state}/timeseries?startTime={iso8601}&endTime={iso8601}
       ]
     }
   ],
-  "totalFrames": 7,
-  "timeSpanMinutes": 60
+  "startTime": "2025-01-15T07:00:00Z",
+  "endTime": "2025-01-15T10:00:00Z",
+  "totalFrames": 7
 }
 ```
+
+**Status Codes:**
+- `200 OK`: Historical data available
+- `400 Bad Request`: Invalid request (e.g., time range exceeds maximum allowed duration, invalid time format, startTime after endTime)
+- `404 Not Found`: 
+  - **Location not cached**: No cache exists for this location. Cache update is triggered in background. Response includes cache status:
+    ```json
+    {
+      "error": "No cached data found for this location. Cache update has been triggered in background. Please retry in a few moments.",
+      "retryAfter": 30,
+      "refreshEndpoint": "/api/cache/Brisbane/QLD/refresh",
+      "updateTriggered": true,
+      "cacheExists": false,
+      "cacheIsValid": false,
+      "cacheExpiresAt": null,
+      "nextUpdateTime": "2025-01-15T10:12:30Z",
+      "message": "No cache exists, update triggered"
+    }
+    ```
+  - **No data in range**: Cache exists but no data in the requested time range. Response includes available cache range:
+    ```json
+    {
+      "error": "No historical data found for the specified time range.",
+      "availableRange": {
+        "oldest": "2025-01-15T08:00:00Z",
+        "newest": "2025-01-15T10:00:00Z",
+        "totalCacheFolders": 10,
+        "timeSpanMinutes": 120
+      },
+      "requestedRange": {
+        "start": "2025-01-15T00:00:00Z",
+        "end": "2025-01-15T10:00:00Z"
+      },
+      "suggestion": "Try adjusting the time range to match the available cached data."
+    }
+    ```
+
+**Time Range Limits:**
+- Maximum time range is configurable via `TimeSeries:MaxTimeRangeHours` (defaults to `CacheRetentionHours` or minimum 24 hours)
+- If `TimeSeries:MaxTimeRangeHours` is not set, the limit automatically matches your `CacheRetentionHours` setting
+- This ensures you can always query all available cached data (e.g., if retention is 72 hours, you can query up to 72 hours)
+- If no time range is specified, returns all available historical data
+- **Note**: `CacheRetentionHours` can be set to any positive integer value (24, 48, 72, 168, etc.)
 
 #### Get Cache Range
 
@@ -513,11 +564,11 @@ http://localhost:8082/radar/Brisbane/QLD
 
 - **Slideshow Playback**: Play, pause, and navigate through radar frames
 - **Frame Navigation**: Use slider, buttons, or keyboard shortcuts (arrow keys, spacebar)
-- **Extended Timespans**: View historical data from 1 hour to 24 hours
+- **Extended Timespans**: View historical data with configurable time ranges (based on cache retention settings)
 - **Custom Time Ranges**: Select specific start and end times for historical viewing
-- **Auto-Refresh**: Automatically checks for new data at configurable intervals
+- **Auto-Refresh**: Automatically checks for new data at configurable intervals (minimum 5 seconds, no maximum)
 - **Cache Status**: Real-time display of cache validity, expiration, and update status
-- **Settings Panel**: Configure frame intervals, refresh rates, and playback options
+- **Settings Panel**: Configure frame intervals (minimum 0.1 seconds, no maximum), refresh rates, and playback options
 
 ### Keyboard Shortcuts
 
@@ -579,6 +630,33 @@ async function getHistoricalRadar(suburb, state, hoursBack = 3) {
     const response = await fetch(
         `/api/radar/${suburb}/${state}/timeseries?startTime=${startTime.toISOString()}&endTime=${endTime.toISOString()}`
     );
+    
+    if (response.status === 400) {
+        const error = await response.json();
+        // Error will include maxHours and cacheRetentionHours for context
+        throw new Error(error.error || 'Invalid time range request');
+    }
+    
+    if (response.status === 404) {
+        const error = await response.json();
+        
+        // Check if location doesn't exist (cache update triggered)
+        if (error.updateTriggered !== undefined || error.cacheExists !== undefined) {
+            // Trigger cache update if endpoint provided
+            if (error.refreshEndpoint) {
+                fetch(error.refreshEndpoint, { method: 'POST' }).catch(() => {});
+            }
+            throw new Error(`No cache found. ${error.message || 'Cache update triggered, please retry in a few moments.'}`);
+        }
+        
+        // Cache exists but no data in range
+        if (error.availableRange) {
+            const range = error.availableRange;
+            throw new Error(`${error.error} Available data: ${range.oldest} to ${range.newest}. ${error.suggestion || ''}`);
+        }
+        
+        throw new Error(error.error || 'No historical data found');
+    }
     
     if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
@@ -656,7 +734,29 @@ curl -X POST http://localhost:8082/api/cache/Brisbane/QLD/refresh
 
 **Get historical data (last 3 hours):**
 ```bash
-curl "http://localhost:8082/api/radar/Brisbane/QLD/timeseries?startTime=2025-01-15T07:00:00Z"
+curl "http://localhost:8082/api/radar/Brisbane/QLD/timeseries?startTime=2025-01-15T07:00:00Z&endTime=2025-01-15T10:00:00Z"
+```
+
+**Get historical data with error handling:**
+```bash
+# Check response status
+response=$(curl -s -w "\n%{http_code}" "http://localhost:8082/api/radar/Brisbane/QLD/timeseries?startTime=2025-01-15T07:00:00Z&endTime=2025-01-15T10:00:00Z")
+http_code=$(echo "$response" | tail -n1)
+body=$(echo "$response" | sed '$d')
+
+if [ "$http_code" = "200" ]; then
+    echo "Success: $body"
+elif [ "$http_code" = "400" ]; then
+    echo "Bad Request: $body"
+elif [ "$http_code" = "404" ]; then
+    echo "Not Found: $body"
+    # Check if cache update was triggered
+    if echo "$body" | grep -q "updateTriggered"; then
+        echo "Cache update triggered, retry in a few moments"
+    fi
+else
+    echo "Error ($http_code): $body"
+fi
 ```
 
 ## Troubleshooting
