@@ -406,7 +406,16 @@ public class BomRadarService : IBomRadarService, IDisposable
                 }
             }
             
-            semaphore.Release();
+            // Safely release semaphore - it may be disposed during application shutdown
+            try
+            {
+                semaphore.Release();
+            }
+            catch (ObjectDisposedException)
+            {
+                // Semaphore was disposed during shutdown, ignore
+                _logger.LogDebug("Semaphore was disposed, skipping release");
+            }
         }
     }
 

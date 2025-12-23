@@ -190,20 +190,32 @@ public class TimeParsingService : ITimeParsingService
                 }
             }
             
-            // Determine the timezone - use configured timezone if not specified or if it's AEST/AEDT
+            // Determine the timezone - map AEST/AEDT based on what the BOM website displays
+            // Note: The BOM website shows the timezone abbreviation for the location being viewed,
+            // NOT the browser's configured timezone. The browser timezone only affects JavaScript Date operations.
             TimeZoneInfo tz = _timeZoneInfo;
             if (!string.IsNullOrEmpty(timezoneStr))
             {
-                // AEST/AEDT are typically the same as Australia/Brisbane or Australia/Sydney
-                // Both Brisbane and Sydney use AEST/AEDT
-                if (timezoneStr.Contains("AEST", StringComparison.OrdinalIgnoreCase) || 
-                    timezoneStr.Contains("AEDT", StringComparison.OrdinalIgnoreCase))
+                // Map timezone abbreviations to actual timezones:
+                // - "AEST" = UTC+10 (Australian Eastern Standard Time)
+                //   Used by Brisbane year-round, and by Sydney/Melbourne during winter
+                //   Since both are UTC+10 when showing AEST, we use Brisbane timezone (UTC+10 year-round)
+                // - "AEDT" = UTC+11 (Australian Eastern Daylight Time)  
+                //   Used by Sydney/Melbourne during summer (Oct-Apr), never Brisbane
+                //   We use Sydney timezone which handles the UTC+11 offset correctly
+                if (timezoneStr.Contains("AEST", StringComparison.OrdinalIgnoreCase))
                 {
-                    tz = _timeZoneInfo; // Use configured timezone
+                    // AEST maps to Brisbane timezone (UTC+10) - works for both Brisbane and Sydney in winter
+                    tz = TimeZoneInfo.FindSystemTimeZoneById("Australia/Brisbane");
+                }
+                else if (timezoneStr.Contains("AEDT", StringComparison.OrdinalIgnoreCase))
+                {
+                    // AEDT maps to Sydney timezone (UTC+11) - only appears in summer for Sydney/Melbourne
+                    tz = TimeZoneInfo.FindSystemTimeZoneById("Australia/Sydney");
                 }
                 else
                 {
-                    // Try to find the timezone, fallback to configured
+                    // Try to find the timezone by name, fallback to configured browser timezone
                     try
                     {
                         tz = TimeZoneInfo.FindSystemTimeZoneById(timezoneStr);

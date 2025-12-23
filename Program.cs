@@ -30,6 +30,9 @@ if (enableHttpsRedirection)
 // Enable routing (required for CORS to work with controllers)
 app.UseRouting();
 
+// Static files (for wwwroot assets like CSS, JS, images)
+app.UseStaticFiles();
+
 // CORS middleware - MUST be after UseRouting but before MapControllers
 app.UseCors();
 
