@@ -151,17 +151,37 @@ public class SelectSearchResultStep : BaseScrapingStep
                     stateMatchScore = 25; // Match in full text gets lower score
                 }
                 
-                // Combine suburb and state scores for total match score
-                var totalScore = matchesSuburb && matchesState ? matchScore + stateMatchScore : 0;
+                // Require BOTH suburb AND state match, with state match being mandatory
+                // For ambiguous locations like Ashburton (exists in both VIC and WA), 
+                // we must have explicit state confirmation
+                var totalScore = 0;
+                
+                if (matchesSuburb && matchesState)
+                {
+                    // Boost score significantly for exact state abbreviation matches
+                    if (stateMatchScore >= 100) // Exact state abbreviation
+                    {
+                        totalScore = matchScore + stateMatchScore + 200; // Extra boost for exact state
+                    }
+                    else
+                    {
+                        totalScore = matchScore + stateMatchScore;
+                    }
+                }
                 
                 Logger.LogInformation("Result {Index}: matchesSuburb={MatchesSuburb} (score={SuburbScore}), matchesState={MatchesState} (score={StateScore}), totalScore={TotalScore}", 
                     i, matchesSuburb, matchScore, matchesState, stateMatchScore, totalScore);
                 
+                // Only consider results that match BOTH suburb AND state
                 if (matchesSuburb && matchesState && totalScore > bestMatchScore)
                 {
                     matchingIndex = i;
                     bestMatchScore = totalScore;
                     Logger.LogInformation("New best match found: {Name} - {Desc} (total score: {Score})", name, desc, totalScore);
+                }
+                else if (matchesSuburb && !matchesState)
+                {
+                    Logger.LogWarning("Rejecting result {Index} - matches suburb but not state: {Name} - {Desc}", i, name, desc);
                 }
             }
             
