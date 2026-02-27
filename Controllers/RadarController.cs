@@ -29,8 +29,8 @@ public class RadarController : ControllerBase
     /// <summary>
     /// Get radar data for a location. Returns JSON with all frames and their URLs. Triggers background update if cache is stale.
     /// </summary>
-    [HttpGet("{suburb}/{state}")]
-    public async Task<ActionResult<RadarResponse>> GetRadar(string suburb, string state, CancellationToken cancellationToken = default)
+    [HttpGet("{state}/{suburb}")]
+    public async Task<ActionResult<RadarResponse>> GetRadar(string state, string suburb, CancellationToken cancellationToken = default)
     {
         try
         {
@@ -139,8 +139,8 @@ public class RadarController : ControllerBase
     /// <summary>
     /// Get a specific frame image for a location.
     /// </summary>
-    [HttpGet("{suburb}/{state}/frame/{frameIndex}")]
-    public async Task<ActionResult> GetFrame(string suburb, string state, int frameIndex, CancellationToken cancellationToken = default)
+    [HttpGet("{state}/{suburb}/frame/{frameIndex}")]
+    public async Task<ActionResult> GetFrame(string state, string suburb, int frameIndex, CancellationToken cancellationToken = default)
     {
         try
         {
@@ -204,8 +204,8 @@ public class RadarController : ControllerBase
     /// <summary>
     /// Get metadata about the cached radar data for a location (observation time, forecast time, etc.)
     /// </summary>
-    [HttpGet("{suburb}/{state}/metadata")]
-    public async Task<ActionResult<LastUpdatedInfo>> GetMetadata(string suburb, string state, CancellationToken cancellationToken = default)
+    [HttpGet("{state}/{suburb}/metadata")]
+    public async Task<ActionResult<LastUpdatedInfo>> GetMetadata(string state, string suburb, CancellationToken cancellationToken = default)
     {
         try
         {
@@ -249,10 +249,10 @@ public class RadarController : ControllerBase
     /// Get historical radar data (frames from multiple cache folders) between specified timestamps.
     /// Radar frames can be joined across cache folders because they represent a historical time series.
     /// </summary>
-    [HttpGet("{suburb}/{state}/timeseries")]
+    [HttpGet("{state}/{suburb}/timeseries")]
     public async Task<ActionResult<RadarTimeSeriesResponse>> GetRadarTimeSeries(
-        string suburb, 
         string state, 
+        string suburb, 
         [FromQuery] string? startTime = null, 
         [FromQuery] string? endTime = null,
         CancellationToken cancellationToken = default)
