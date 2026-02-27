@@ -132,23 +132,36 @@ public class SelectSearchResultStep : BaseScrapingStep
                 }
                 
                 var matchesState = false;
-                if (!string.IsNullOrEmpty(desc))
+                var stateMatchScore = 0;
+                
+                // Check for exact state abbreviation match first (highest priority)
+                if (!string.IsNullOrEmpty(desc) && descLower.Contains(stateLower))
                 {
-                    matchesState = StateAbbreviationHelper.MatchesState(descLower, stateLower);
+                    matchesState = true;
+                    stateMatchScore = 100; // Exact abbreviation match gets highest score
                 }
-                if (!matchesState)
+                else if (!string.IsNullOrEmpty(desc) && StateAbbreviationHelper.MatchesState(descLower, stateLower))
                 {
-                    matchesState = StateAbbreviationHelper.MatchesState(fullTextLower, stateLower);
+                    matchesState = true;
+                    stateMatchScore = 50; // Full name match gets medium score
+                }
+                else if (StateAbbreviationHelper.MatchesState(fullTextLower, stateLower))
+                {
+                    matchesState = true;
+                    stateMatchScore = 25; // Match in full text gets lower score
                 }
                 
-                Logger.LogInformation("Result {Index}: matchesSuburb={MatchesSuburb} (score={Score}), matchesState={MatchesState}", 
-                    i, matchesSuburb, matchScore, matchesState);
+                // Combine suburb and state scores for total match score
+                var totalScore = matchesSuburb && matchesState ? matchScore + stateMatchScore : 0;
                 
-                if (matchesSuburb && matchesState && matchScore > bestMatchScore)
+                Logger.LogInformation("Result {Index}: matchesSuburb={MatchesSuburb} (score={SuburbScore}), matchesState={MatchesState} (score={StateScore}), totalScore={TotalScore}", 
+                    i, matchesSuburb, matchScore, matchesState, stateMatchScore, totalScore);
+                
+                if (matchesSuburb && matchesState && totalScore > bestMatchScore)
                 {
                     matchingIndex = i;
-                    bestMatchScore = matchScore;
-                    Logger.LogInformation("New best match found: {Name} - {Desc} (score: {Score})", name, desc, matchScore);
+                    bestMatchScore = totalScore;
+                    Logger.LogInformation("New best match found: {Name} - {Desc} (total score: {Score})", name, desc, totalScore);
                 }
             }
             
