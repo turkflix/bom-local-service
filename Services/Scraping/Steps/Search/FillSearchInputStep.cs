@@ -27,10 +27,11 @@ public class FillSearchInputStep : BaseScrapingStep
     {
         try
         {
-            Logger.LogInformation("Step {Step}: Searching for suburb: {Suburb}", Name, context.Suburb);
+            var searchQuery = $"{context.Suburb} {context.State}";
+            Logger.LogInformation("Step {Step}: Searching for location: {SearchQuery}", Name, searchQuery);
             
             var searchInput = SelectorService.GetLocator(context.Page, Selectors.SearchInput);
-            await searchInput.FillAsync(context.Suburb);
+            await searchInput.FillAsync(searchQuery);
             
             context.SearchInput = searchInput;
             await SaveDebugAsync(context, 3, "search_input_filled", cancellationToken);
